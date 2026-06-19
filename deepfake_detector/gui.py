@@ -315,6 +315,7 @@ class DeepfakeDetectorApp:
                 self.log(self.video_log,
                          f"Visual: {comps.get('visual','?')}%  "
                          f"Audio: {comps.get('audio','?')}%  "
+                         f"Lip-sync: {comps.get('lipsync','?')}%  "
                          f"Temporal: {comps.get('temporal','?')}%  "
                          f"SPN: {comps.get('spn','?')}%  "
                          f"Forensic: {comps.get('forensic','?')}%  "
