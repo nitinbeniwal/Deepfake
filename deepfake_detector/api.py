@@ -26,7 +26,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -101,6 +101,14 @@ def _run_video_job(job_id: str, path: str, filename: str):
         if os.path.exists(path):
             try: os.remove(path)
             except OSError: pass
+
+
+# ─── dashboard ───────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    from web_ui import DASHBOARD_HTML
+    return DASHBOARD_HTML
 
 
 # ─── health ──────────────────────────────────────────────────────────────────
