@@ -123,8 +123,16 @@ def _forensic(face_paths):
 
 
 def _combine(component_scores):
+    # If metadata is stripped (WhatsApp/re-encode scenario), redistribute
+    # its 3% weight to forensic + temporal which are compression-robust
+    meta = component_scores.get("metadata", 0) or 0
+    wts = dict(W)
+    if meta < 5:
+        wts["forensic"] = round(W["forensic"] + 0.02, 3)
+        wts["temporal"] = round(W["temporal"] + 0.01, 3)
+        wts["metadata"] = 0.0
     tw = ws = 0.0
-    for k, wt in W.items():
+    for k, wt in wts.items():
         s = component_scores.get(k)
         if s is not None:
             ws += s * wt; tw += wt

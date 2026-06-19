@@ -3,6 +3,7 @@ api.py — FastAPI REST API for the deepfake detection system.
 
 Endpoints:
   GET  /health
+  GET  /                     — web dashboard
   POST /analyze/video        — upload video → job_id (202, async)
   GET  /jobs/{job_id}        — poll job status / result
   POST /analyze/video/sync   — synchronous (for internal/LAN use only)
@@ -10,6 +11,8 @@ Endpoints:
   POST /analyze/text         — JSON body {text} → AI-text detection
   POST /analyze/url          — JSON body {url} → crawl + analyse
   GET  /results              — last N scan results
+  POST /feedback             — submit correction for a result
+  GET  /feedback/stats       — feedback summary
 
 Run:
     uvicorn api:app --host 0.0.0.0 --port 8000 --reload
@@ -290,6 +293,59 @@ async def get_results(limit: int = Query(50, ge=1, le=500)):
 
     lines.reverse()
     return JSONResponse({"results": lines[:limit], "total": len(lines)})
+
+
+# ─── feedback ─────────────────────────────────────────────────────────────────
+
+class FeedbackReq(BaseModel):
+    filename: str = ""
+    predicted_verdict: str
+    predicted_score: float
+    correct_verdict: str
+    component_scores: dict = {}
+    notes: str = ""
+
+
+@app.post("/feedback")
+async def submit_feedback(req: FeedbackReq):
+    """Submit a correction for a scan result. Stored for calibration review."""
+    if req.correct_verdict not in {"FAKE", "LIKELY FAKE", "UNCERTAIN", "REAL"}:
+        raise HTTPException(400, "correct_verdict must be FAKE, LIKELY FAKE, UNCERTAIN, or REAL")
+    entry = {
+        "id": str(uuid.uuid4()),
+        "filename": req.filename,
+        "predicted_verdict": req.predicted_verdict,
+        "predicted_score": req.predicted_score,
+        "correct_verdict": req.correct_verdict,
+        "component_scores": req.component_scores,
+        "notes": req.notes,
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(os.path.join(RESULTS_DIR, "feedback.jsonl"), "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return JSONResponse({"status": "ok", "id": entry["id"]})
+
+
+@app.get("/feedback/stats")
+async def feedback_stats():
+    """Summary of submitted corrections."""
+    fpath = os.path.join(RESULTS_DIR, "feedback.jsonl")
+    if not os.path.exists(fpath):
+        return JSONResponse({"total": 0, "corrections": []})
+    entries = []
+    with open(fpath) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try: entries.append(json.loads(line))
+                except json.JSONDecodeError: pass
+    wrong = [e for e in entries if e["predicted_verdict"] != e["correct_verdict"]]
+    return JSONResponse({
+        "total": len(entries),
+        "corrections": len(wrong),
+        "accuracy_rate": round(1 - len(wrong) / max(len(entries), 1), 3),
+        "recent": entries[-10:][::-1],
+    })
 
 
 if __name__ == "__main__":

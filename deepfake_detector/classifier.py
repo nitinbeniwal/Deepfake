@@ -98,6 +98,54 @@ def _run_model(model_id, pil_images, batch_size=8):
         return [None] * len(pil_images)
 
 
+def _run_and_unload(model_id, pil_images, batch_size=8):
+    """Load, run, immediately unload model to free RAM. For sequential LOW_MEM mode."""
+    import gc
+    pipe = _get_pipe(model_id)
+    if pipe is None:
+        return [None] * len(pil_images)
+    try:
+        results = pipe(pil_images, batch_size=batch_size)
+        return [_score(r) for r in results]
+    except Exception as e:
+        print(f"Model {model_id.split('/')[-1]} error: {e}")
+        return [None] * len(pil_images)
+    finally:
+        _pipes.pop(model_id, None)
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _classify_sequential(valid, orig_idxs, image_paths):
+    """All 5 models, one at a time. Unloads each before loading next. Safe on 512MB RAM."""
+    import gc
+    final = [None] * len(image_paths)
+    model_results = {}  # model_id -> list[float|None] for valid images
+
+    for model_id, weight, stage in _MODELS:
+        print(f"[sequential] {model_id.split('/')[-1]} ...")
+        scores = _run_and_unload(model_id, valid)
+        model_results[model_id] = [_calibrate(s) for s in scores]
+        gc.collect()
+
+    for i, orig_i in enumerate(orig_idxs):
+        tw = ws = 0.0
+        for model_id, weight, _ in _MODELS:
+            s = model_results.get(model_id, [None] * len(valid))
+            if i < len(s) and s[i] is not None:
+                ws += s[i] * weight
+                tw += weight
+        if tw:
+            final[orig_i] = _calibrate(ws / tw)
+
+    return final
+
+
 def _calibrate(s):
     if s is None: return None
     return round(max(0.0, min(100.0, s - CALIBRATION_OFFSET)), 2)
@@ -120,7 +168,9 @@ def _weighted_mean(score_map):
 
 def classify_faces_batch(image_paths, verbose=False):
     """
-    3-stage adaptive ensemble. Returns list[float|None] same order as image_paths.
+    In LOW_MEM mode: all 5 models run sequentially, each unloaded before next loads.
+    Normal mode: 3-stage adaptive cascade with TTA.
+    Returns list[float|None] same order as image_paths.
     """
     from PIL import Image
     from collections import defaultdict
@@ -137,6 +187,10 @@ def classify_faces_batch(image_paths, verbose=False):
     if not valid:
         return final
 
+    # Sequential mode: all 5 models, one at a time, safe on 512MB
+    if _LOW_MEM:
+        return _classify_sequential(valid, orig_idxs, image_paths)
+
     primary_id = _MODELS[0][0]
 
     # ── Stage 1: primary on all images ─────────────────────────────────────
@@ -150,12 +204,6 @@ def classify_faces_batch(image_paths, verbose=False):
 
     for i in clear_idxs:
         final[orig_idxs[i]] = primary_scores[i]
-
-    # In low-memory mode, stage 1 result is final — skip loading more models
-    if _LOW_MEM:
-        for i in unc_idxs:
-            final[orig_idxs[i]] = primary_scores[i]
-        return final
 
     if not unc_idxs:
         return final
