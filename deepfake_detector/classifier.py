@@ -1,37 +1,53 @@
 """
-classifier.py — Adaptive 5-model ensemble with TTA.
+classifier.py — 7-model deepfake detection ensemble.
 
-3-stage cascade for maximum accuracy with controlled speed:
-  Stage 1: Primary model fast-screens all frames.
-  Stage 2: Uncertain frames (20-80%) → TTA + 2 secondary models in parallel.
-  Stage 3: Still uncertain after Stage 2 → run 2 specialist models.
+Visual pipeline (sequential, one model at a time, each unloaded before next):
 
-Models (weighted):
-  primary    prithivMLmods/Deep-Fake-Detector-v2-Model     0.30
-  secondary1 dima806/deepfake_vs_real_image_detection       0.25
-  secondary2 Wvolf/ViT-Deepfake-Detection                  0.20
-  specialist1 prithivMLmods/Deepfake-Detection-Exp-02-Model 0.15
-  specialist2 haywoodsloan/autotrain-deepfake-detection     0.10
+  HuggingFace ViT models (transformer-based, face-swap specialists):
+    1. prithivMLmods/Deep-Fake-Detector-v2-Model      weight 0.12  stage 1
+    2. dima806/deepfake_vs_real_image_detection         weight 0.10  stage 2
+    3. Wvolf/ViT-Deepfake-Detection                    weight 0.08  stage 2
+    4. prithivMLmods/Deepfake-Detection-Exp-02-Model   weight 0.07  stage 3
+    5. haywoodsloan/autotrain-deepfake-detection        weight 0.05  stage 3
 
-Specialist models only activate for genuinely uncertain frames.
-This adds accuracy without proportional latency increase.
+  CNN specialists (timm, compression-artifact experts):
+    6. Xception          weight 0.33  stage 3  (FaceForensics++ architecture)
+    7. EfficientNet-B4   weight 0.25  stage 3  (DeepfakeBench top performer)
+
+Fine-tune checkpoints: drop xception_deepfake.pt / efficientnet_b4_deepfake.pt
+next to this file. Without them, CNN models use ImageNet pretrained backbone
+(neutral ~50% output) until you supply trained weights from DF40/FF++.
+
+Stage cascade (normal mode only, not LOW_MEM):
+  Stage 1 → screens all frames with primary ViT.
+  Stage 2 → uncertain frames → TTA + secondary ViTs.
+  Stage 3 → still uncertain → specialist ViTs + CNN models.
 """
 
-import os, threading, statistics
+import gc, os, threading, statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CALIBRATION_OFFSET = 0
-_LOW_MEM = os.environ.get("LOW_MEM", "0") == "1"  # Railway free tier: 1 model only
-UNCERTAIN_LO, UNCERTAIN_HI   = 20, 80   # triggers Stage 2
-STILL_UNCERTAIN_LO, STILL_HI = 35, 65   # triggers Stage 3 (tighter band)
+_LOW_MEM = os.environ.get("LOW_MEM", "0") == "1"
+
+UNCERTAIN_LO, UNCERTAIN_HI   = 20, 80
+STILL_UNCERTAIN_LO, STILL_HI = 35, 65
+
+# Sentinels for timm-based CNN models (not loadable via HF pipeline)
+_XCEPTION_ID     = "timm:xception_deepfake"
+_EFFICIENTNET_ID = "timm:efficientnet_b4_deepfake"
 
 _MODELS = [
-    # (model_id, weight, stage)
-    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.30, 1),
-    ("dima806/deepfake_vs_real_image_detection",        0.25, 2),
-    ("Wvolf/ViT-Deepfake-Detection",                   0.20, 2),
-    ("prithivMLmods/Deepfake-Detection-Exp-02-Model",  0.15, 3),
-    ("haywoodsloan/autotrain-deepfake-detection",       0.10, 3),
+    # (model_id, weight, stage)   — weights sum to 1.0
+    # HuggingFace ViT models
+    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.12, 1),
+    ("dima806/deepfake_vs_real_image_detection",        0.10, 2),
+    ("Wvolf/ViT-Deepfake-Detection",                   0.08, 2),
+    ("prithivMLmods/Deepfake-Detection-Exp-02-Model",  0.07, 3),
+    ("haywoodsloan/autotrain-deepfake-detection",       0.05, 3),
+    # CNN specialists — highest weights, run last
+    (_XCEPTION_ID,                                      0.33, 3),
+    (_EFFICIENTNET_ID,                                  0.25, 3),
 ]
 
 _FAKE = ("fake","deepfake","spoof","synthetic","artificial","generated",
@@ -45,33 +61,220 @@ _lock = threading.Lock()
 def reset_buffers(): return None
 
 
+# ── Xception (timm) ───────────────────────────────────────────────────────────
+
+_xception_instance = None
+_xception_lock     = threading.Lock()
+_XCEPTION_CKPT     = os.path.join(os.path.dirname(__file__), "xception_deepfake.pt")
+
+
+class _XceptionWrapper:
+    """
+    Xception CNN via timm. Mimics HF pipeline __call__ interface.
+    Designed for FaceForensics++ deepfake detection (299×299 input).
+    Drop xception_deepfake.pt (DF40 or FF++ fine-tuned weights) to activate.
+    """
+
+    def __init__(self):
+        import timm, torch
+        from torchvision import transforms
+        print("Loading: xception (timm) ...")
+        self.model = timm.create_model("xception", pretrained=True, num_classes=2)
+        if os.path.exists(_XCEPTION_CKPT):
+            state = torch.load(_XCEPTION_CKPT, map_location="cpu")
+            missing, _ = self.model.load_state_dict(state, strict=False)
+            if missing:
+                print(f"Xception ckpt: {len(missing)} missing keys (head differs — fine)")
+            print("Xception: fine-tuned deepfake checkpoint loaded")
+        else:
+            print("Xception: no checkpoint — ImageNet pretrained (neutral until DF40/FF++ weights provided)")
+        self.model.eval()
+        self.transform = transforms.Compose([
+            transforms.Resize((299, 299)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        ])
+
+    def __call__(self, images, batch_size=4):
+        import torch
+        results = []
+        for i in range(0, len(images), batch_size):
+            batch   = images[i : i + batch_size]
+            tensors = torch.stack([self.transform(img) for img in batch])
+            with torch.no_grad():
+                probs = torch.softmax(self.model(tensors), dim=1)
+            for p in probs:
+                results.append([
+                    {"label": "FAKE", "score": float(p[1])},
+                    {"label": "REAL", "score": float(p[0])},
+                ])
+        return results
+
+
+def _get_xception():
+    global _xception_instance
+    if _xception_instance is None:
+        with _xception_lock:
+            if _xception_instance is None:
+                try:
+                    _xception_instance = _XceptionWrapper()
+                    print("Loaded:  xception OK")
+                except Exception as e:
+                    print(f"SKIP:    xception — {e}")
+    return _xception_instance
+
+
+def _unload_xception():
+    global _xception_instance
+    with _xception_lock:
+        _xception_instance = None
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+# ── EfficientNet-B4 (timm) ────────────────────────────────────────────────────
+
+_efficientnet_instance = None
+_efficientnet_lock     = threading.Lock()
+_EFFICIENTNET_CKPT     = os.path.join(os.path.dirname(__file__), "efficientnet_b4_deepfake.pt")
+
+
+class _EfficientNetWrapper:
+    """
+    EfficientNet-B4 CNN via timm. Mimics HF pipeline __call__ interface.
+    DeepfakeBench top performer on FF++ (97% AUC). 380×380 input.
+    Drop efficientnet_b4_deepfake.pt (DeepfakeBench weights) to activate.
+    """
+
+    def __init__(self):
+        import timm, torch
+        from torchvision import transforms
+        print("Loading: efficientnet_b4 (timm) ...")
+        self.model = timm.create_model("efficientnet_b4", pretrained=True, num_classes=2)
+        if os.path.exists(_EFFICIENTNET_CKPT):
+            state = torch.load(_EFFICIENTNET_CKPT, map_location="cpu")
+            missing, _ = self.model.load_state_dict(state, strict=False)
+            if missing:
+                print(f"EfficientNet-B4 ckpt: {len(missing)} missing keys")
+            print("EfficientNet-B4: fine-tuned deepfake checkpoint loaded")
+        else:
+            print("EfficientNet-B4: no checkpoint — ImageNet pretrained (neutral until DeepfakeBench weights provided)")
+        self.model.eval()
+        self.transform = transforms.Compose([
+            transforms.Resize((380, 380)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+    def __call__(self, images, batch_size=4):
+        import torch
+        results = []
+        for i in range(0, len(images), batch_size):
+            batch   = images[i : i + batch_size]
+            tensors = torch.stack([self.transform(img) for img in batch])
+            with torch.no_grad():
+                probs = torch.softmax(self.model(tensors), dim=1)
+            for p in probs:
+                results.append([
+                    {"label": "FAKE", "score": float(p[1])},
+                    {"label": "REAL", "score": float(p[0])},
+                ])
+        return results
+
+
+def _get_efficientnet():
+    global _efficientnet_instance
+    if _efficientnet_instance is None:
+        with _efficientnet_lock:
+            if _efficientnet_instance is None:
+                try:
+                    _efficientnet_instance = _EfficientNetWrapper()
+                    print("Loaded:  efficientnet_b4 OK")
+                except Exception as e:
+                    print(f"SKIP:    efficientnet_b4 — {e}")
+    return _efficientnet_instance
+
+
+def _unload_efficientnet():
+    global _efficientnet_instance
+    with _efficientnet_lock:
+        _efficientnet_instance = None
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+# ── Unified model loader / unloader ──────────────────────────────────────────
+
 def _get_pipe(model_id):
+    """Load and return model by ID. Handles both HF pipeline and timm sentinels."""
+    if model_id == _XCEPTION_ID:
+        return _get_xception()
+    if model_id == _EFFICIENTNET_ID:
+        return _get_efficientnet()
     if model_id not in _pipes:
         with _lock:
             if model_id not in _pipes:
                 from transformers import pipeline
-                print(f"Loading: {model_id.split('/')[-1]} ...")
+                short = model_id.split("/")[-1]
+                print(f"Loading: {short} ...")
                 try:
                     _pipes[model_id] = pipeline("image-classification", model=model_id)
-                    print(f"Loaded:  {model_id.split('/')[-1]} OK")
+                    print(f"Loaded:  {short} OK")
                 except Exception as e:
-                    print(f"SKIP:    {model_id.split('/')[-1]} — {e}")
+                    print(f"SKIP:    {short} — {e}")
                     _pipes[model_id] = None
     return _pipes.get(model_id)
 
 
+def _unload_model(model_id):
+    """Unload any model type from memory."""
+    if model_id == _XCEPTION_ID:
+        _unload_xception()
+        return
+    if model_id == _EFFICIENTNET_ID:
+        _unload_efficientnet()
+        return
+    _pipes.pop(model_id, None)
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+# ── Score helpers ─────────────────────────────────────────────────────────────
+
 def _score(results):
     fp = rp = None
     for r in results:
-        lbl = r["label"].strip().lower()
-        is_f = any(t in lbl for t in _FAKE) or lbl in ("label_1","1")
-        is_r = any(t in lbl for t in _REAL) or lbl in ("label_0","0")
-        if is_f and not is_r: fp = max(fp, r["score"]) if fp else r["score"]
-        elif is_r and not is_f: rp = max(rp, r["score"]) if rp else r["score"]
+        lbl  = r["label"].strip().lower()
+        is_f = any(t in lbl for t in _FAKE) or lbl in ("label_1", "1")
+        is_r = any(t in lbl for t in _REAL) or lbl in ("label_0", "0")
+        if is_f and not is_r:
+            fp = max(fp, r["score"]) if fp else r["score"]
+        elif is_r and not is_f:
+            rp = max(rp, r["score"]) if rp else r["score"]
     if fp: return fp * 100
     if rp: return (1 - rp) * 100
     top = max(results, key=lambda r: r["score"])
     return ((1 - top["score"]) if any(t in top["label"].lower() for t in _REAL) else top["score"]) * 100
+
+
+def _calibrate(s):
+    if s is None: return None
+    return round(max(0.0, min(100.0, s - CALIBRATION_OFFSET)), 2)
 
 
 def _tta(img):
@@ -86,6 +289,8 @@ def _tta(img):
     ]
 
 
+# ── Model runners ─────────────────────────────────────────────────────────────
+
 def _run_model(model_id, pil_images, batch_size=8):
     pipe = _get_pipe(model_id)
     if pipe is None:
@@ -94,13 +299,13 @@ def _run_model(model_id, pil_images, batch_size=8):
         results = pipe(pil_images, batch_size=batch_size)
         return [_score(r) for r in results]
     except Exception as e:
-        print(f"Model {model_id.split('/')[-1]} error: {e}")
+        short = model_id.split("/")[-1] if "/" in model_id else model_id
+        print(f"Model {short} error: {e}")
         return [None] * len(pil_images)
 
 
-def _run_and_unload(model_id, pil_images, batch_size=8):
-    """Load, run, immediately unload model to free RAM. For sequential LOW_MEM mode."""
-    import gc
+def _run_and_unload(model_id, pil_images, batch_size=4):
+    """Load → run → unload. Used in sequential / LOW_MEM mode."""
     pipe = _get_pipe(model_id)
     if pipe is None:
         return [None] * len(pil_images)
@@ -108,28 +313,22 @@ def _run_and_unload(model_id, pil_images, batch_size=8):
         results = pipe(pil_images, batch_size=batch_size)
         return [_score(r) for r in results]
     except Exception as e:
-        print(f"Model {model_id.split('/')[-1]} error: {e}")
+        short = model_id.split("/")[-1] if "/" in model_id else model_id
+        print(f"Model {short} error: {e}")
         return [None] * len(pil_images)
     finally:
-        _pipes.pop(model_id, None)
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _unload_model(model_id)
 
 
 def _classify_sequential(valid, orig_idxs, image_paths):
-    """All 5 models, one at a time. Unloads each before loading next. Safe on 512MB RAM."""
-    import gc
+    """All 7 models, one at a time, each unloaded before next. Safe on 512MB RAM."""
     final = [None] * len(image_paths)
-    model_results = {}  # model_id -> list[float|None] for valid images
+    model_results = {}
 
-    for model_id, weight, stage in _MODELS:
-        print(f"[sequential] {model_id.split('/')[-1]} ...")
-        scores = _run_and_unload(model_id, valid)
+    for model_id, weight, _stage in _MODELS:
+        short = model_id.split("/")[-1] if "/" in model_id else model_id
+        print(f"[sequential] {short} ...")
+        scores = _run_and_unload(model_id, valid, batch_size=4)
         model_results[model_id] = [_calibrate(s) for s in scores]
         gc.collect()
 
@@ -146,29 +345,11 @@ def _classify_sequential(valid, orig_idxs, image_paths):
     return final
 
 
-def _calibrate(s):
-    if s is None: return None
-    return round(max(0.0, min(100.0, s - CALIBRATION_OFFSET)), 2)
-
-
-def _weighted_mean(score_map):
-    """score_map: {model_id: [scores]}. Returns per-image weighted mean."""
-    valid_models = [(mid, w, stage) for mid, w, stage in _MODELS
-                    if mid in score_map and score_map[mid]]
-    if not valid_models:
-        return None
-    tw = ws = 0.0
-    for mid, w, _ in valid_models:
-        s = score_map[mid]
-        if s is not None:
-            ws += statistics.mean(s if isinstance(s, list) else [s]) * w
-            tw += w
-    return round(ws / tw, 2) if tw else None
-
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def classify_faces_batch(image_paths, verbose=False):
     """
-    In LOW_MEM mode: all 5 models run sequentially, each unloaded before next loads.
+    LOW_MEM mode: all 7 models sequential, each unloaded before next.
     Normal mode: 3-stage adaptive cascade with TTA.
     Returns list[float|None] same order as image_paths.
     """
@@ -187,14 +368,13 @@ def classify_faces_batch(image_paths, verbose=False):
     if not valid:
         return final
 
-    # Sequential mode: all 5 models, one at a time, safe on 512MB
     if _LOW_MEM:
         return _classify_sequential(valid, orig_idxs, image_paths)
 
     primary_id = _MODELS[0][0]
 
-    # ── Stage 1: primary on all images ─────────────────────────────────────
-    raw1 = _run_model(primary_id, valid)
+    # Stage 1: primary ViT on all images
+    raw1           = _run_model(primary_id, valid)
     primary_scores = [_calibrate(s) for s in raw1]
 
     clear_idxs = [i for i, s in enumerate(primary_scores)
@@ -208,10 +388,9 @@ def classify_faces_batch(image_paths, verbose=False):
     if not unc_idxs:
         return final
 
-    # ── Stage 2: uncertain → TTA + secondary models ─────────────────────────
+    # Stage 2: uncertain → TTA + secondary ViTs
     unc_imgs     = [valid[i] for i in unc_idxs]
     unc_orig_idx = [orig_idxs[i] for i in unc_idxs]
-
     aug_batch, aug_map = [], []
     for idx, img in enumerate(unc_imgs):
         for aug in _tta(img):
@@ -220,23 +399,19 @@ def classify_faces_batch(image_paths, verbose=False):
 
     img_scores = defaultdict(lambda: defaultdict(list))
 
-    # Primary TTA on uncertain
     for aug_idx, s in enumerate(_run_model(primary_id, aug_batch)):
         if s is not None:
             img_scores[aug_map[aug_idx]][primary_id].append(s)
 
-    # Stage-2 models in parallel
-    stage2_models = [(mid, w) for mid, w, stage in _MODELS if stage == 2]
-    with ThreadPoolExecutor(max_workers=len(stage2_models)) as ex:
-        futs = {ex.submit(_run_model, mid, aug_batch): (mid, w)
-                for mid, w in stage2_models}
+    stage2_hf = [(mid, w) for mid, w, stage in _MODELS if stage == 2]
+    with ThreadPoolExecutor(max_workers=max(1, len(stage2_hf))) as ex:
+        futs = {ex.submit(_run_model, mid, aug_batch): mid for mid, w in stage2_hf}
         for fut in as_completed(futs):
-            mid, _ = futs[fut]
+            mid = futs[fut]
             for aug_idx, s in enumerate(fut.result()):
                 if s is not None:
                     img_scores[aug_map[aug_idx]][mid].append(s)
 
-    # Compute Stage 2 scores
     stage2_results = []
     for local_idx in range(len(unc_imgs)):
         tw = ws = 0.0
@@ -247,48 +422,54 @@ def classify_faces_batch(image_paths, verbose=False):
                 tw += w
         stage2_results.append(_calibrate(ws / tw) if tw else None)
 
-    # ── Stage 3: still uncertain after Stage 2 → specialist models ──────────
+    # Stage 3: still uncertain → specialist ViTs + CNN models (sequential for CNNs)
     still_unc = [i for i, s in enumerate(stage2_results)
                  if s is None or STILL_UNCERTAIN_LO <= s <= STILL_HI]
 
     if still_unc:
-        su_imgs     = [unc_imgs[i] for i in still_unc]
+        su_imgs = [unc_imgs[i] for i in still_unc]
         su_aug, su_map = [], []
         for idx, img in enumerate(su_imgs):
             for aug in _tta(img):
                 su_aug.append(aug)
                 su_map.append(idx)
 
-        stage3_models = [(mid, w) for mid, w, stage in _MODELS if stage == 3]
         spec_scores = defaultdict(lambda: defaultdict(list))
 
-        with ThreadPoolExecutor(max_workers=len(stage3_models)) as ex:
-            futs = {ex.submit(_run_model, mid, su_aug): (mid, w)
-                    for mid, w in stage3_models}
+        # HF stage-3 models in parallel
+        stage3_hf = [(mid, w) for mid, w, stage in _MODELS
+                     if stage == 3 and mid not in (_XCEPTION_ID, _EFFICIENTNET_ID)]
+        with ThreadPoolExecutor(max_workers=max(1, len(stage3_hf))) as ex:
+            futs = {ex.submit(_run_model, mid, su_aug): mid for mid, w in stage3_hf}
             for fut in as_completed(futs):
-                mid, _ = futs[fut]
+                mid = futs[fut]
                 for aug_idx, s in enumerate(fut.result()):
                     if s is not None:
                         spec_scores[su_map[aug_idx]][mid].append(s)
 
+        # CNN models sequential (heavy — load/run/unload one at a time)
+        for cnn_id in (_XCEPTION_ID, _EFFICIENTNET_ID):
+            cnn_scores = _run_and_unload(cnn_id, su_imgs, batch_size=4)
+            for local_idx, s in enumerate(cnn_scores):
+                if s is not None:
+                    spec_scores[local_idx][cnn_id].append(s)
+
         for su_local, local_idx in enumerate(still_unc):
-            # Combine all 5 models for final uncertain score
             tw = ws = 0.0
             for mid, w, _ in _MODELS:
-                src = img_scores[local_idx] if _ < 3 else spec_scores[su_local]
-                augs = src.get(mid, []) if isinstance(src, dict) else []
+                src  = img_scores[local_idx] if mid in img_scores[local_idx] else spec_scores[su_local]
+                augs = src.get(mid, [])
                 if augs:
                     ws += statistics.mean(augs) * w
                     tw += w
             if tw:
                 stage2_results[local_idx] = _calibrate(ws / tw)
 
-    # Write Stage 2/3 results
     for local_idx in range(len(unc_imgs)):
         s = stage2_results[local_idx]
         final[unc_orig_idx[local_idx]] = s
         if verbose and s is not None:
-            print(f"  [ensemble] {image_paths[unc_orig_idx[local_idx]].split('/')[-1]} → {s:.1f}%")
+            print(f"  [ensemble] frame → {s:.1f}%")
 
     return final
 

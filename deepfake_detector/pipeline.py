@@ -62,10 +62,10 @@ def _combine(cs):
 
 
 def _unload_hf(model_id):
-    """Remove a HuggingFace pipeline from the classifier cache and free RAM."""
+    """Unload any model (HF or timm) from classifier cache and free RAM."""
     try:
-        from classifier import _pipes
-        _pipes.pop(model_id, None)
+        from classifier import _unload_model
+        _unload_model(model_id)
     except Exception:
         pass
     gc.collect()
@@ -150,7 +150,7 @@ def analyze_video(video_path, cleanup=True, on_stage=None):
         step("extraction_done", dict(cs))
         gc.collect()
 
-        # ── Step 2: Visual — 5 models sequentially ────────────────────────
+        # ── Step 2: Visual — 7 models sequentially (ViT × 5, Xception, EfficientNet-B4)
         step("visual")
         vis_score = None
         if face_paths:
@@ -161,7 +161,9 @@ def analyze_video(video_path, cleanup=True, on_stage=None):
                 model_accum = {}  # model_id → (mean_score, weight)
 
                 for model_id, weight, _stage in _MODELS:
-                    step(f"visual:{model_id.split('/')[-1]}", dict(cs))
+                    # Build short label for live stage reporting
+                    short = model_id.split("/")[-1] if "/" in model_id else model_id.split(":")[-1]
+                    step(f"visual:{short}", dict(cs))
                     try:
                         from PIL import Image
                         pils = []
@@ -181,9 +183,9 @@ def analyze_video(video_path, cleanup=True, on_stage=None):
                                     model_accum[model_id] = (_stats.mean(valid), weight)
                         del pils
                     except Exception as ex:
-                        print(f"Visual model {model_id.split('/')[-1]} error: {ex}")
+                        short = model_id.split("/")[-1] if "/" in model_id else model_id
+                        print(f"Visual model {short} error: {ex}")
                     finally:
-                        # Unload this model before loading next
                         _unload_hf(model_id)
 
                 if model_accum:
