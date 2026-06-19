@@ -658,17 +658,29 @@ function hideResult() {
 let _pollTimer = null, _simTimer = null, _pollCount = 0;
 const MAX_POLLS = 150;
 
-const STAGES    = ['meta','visual','audio','temporal','lipsync','spn','forensic'];
-const STAGE_AT  = [0, 3, 40, 60, 75, 95, 120];
-const STAGE_MSG = [
-  'Checking metadata',
-  'Running visual models (sequential, 5 models)',
-  'Analyzing audio',
-  'Temporal consistency check',
-  'Lip-sync correlation',
-  'SPN noise fingerprint',
-  'Forensic rules'
-];
+const STAGES = ['meta','visual','audio','temporal','lipsync','spn','forensic'];
+
+// Map pipeline stage names → display label + which chip to activate
+const STAGE_MAP = {
+  'metadata':         {chip:'meta',     label:'Checking metadata'},
+  'metadata_done':    {chip:'meta',     label:'Metadata done',     done:['meta']},
+  'extraction':       {chip:'meta',     label:'Extracting frames'},
+  'extraction_done':  {chip:'meta',     label:'Frames extracted',  done:['meta']},
+  'visual':           {chip:'visual',   label:'Starting visual models'},
+};
+// visual:ModelName entries are dynamic — handled in pollJob
+const VISUAL_DONE  = {chip:'visual',   label:'Visual analysis done', done:['meta','visual']};
+const AUDIO_STAGE  = {chip:'audio',    label:'Analyzing audio'};
+const AUDIO_DONE   = {chip:'audio',    label:'Audio done',           done:['meta','visual','audio']};
+const TEMPORAL_S   = {chip:'temporal', label:'Temporal consistency check'};
+const TEMPORAL_D   = {chip:'temporal', label:'Temporal done',        done:['meta','visual','audio','temporal']};
+const LIPSYNC_S    = {chip:'lipsync',  label:'Lip-sync correlation'};
+const LIPSYNC_D    = {chip:'lipsync',  label:'Lip-sync done',        done:['meta','visual','audio','temporal','lipsync']};
+const SPN_S        = {chip:'spn',      label:'SPN noise fingerprint'};
+const SPN_D        = {chip:'spn',      label:'SPN done',             done:['meta','visual','audio','temporal','lipsync','spn']};
+const FORENSIC_S   = {chip:'forensic', label:'Forensic rules'};
+const FORENSIC_D   = {chip:'forensic', label:'Forensic done',        done:['meta','visual','audio','temporal','lipsync','spn','forensic']};
+const COMBINING    = {label:'Combining all signals…'};
 
 function startAnalysis() {
   if (!_file) return;
@@ -689,8 +701,9 @@ function startAnalysis() {
     .then(r => r.json())
     .then(data => {
       if (data.job_id) {
+        _elapsed = 0;
         setProgress(4, 'Job accepted', 'ID: ' + data.job_id.slice(0,8) + '… polling every 4s');
-        simulateProgress();
+        simulateProgress(); // slow bar movement fallback between polls
         _pollTimer = setInterval(() => pollJob(data.job_id), 4000);
       } else if (data.final_score !== undefined) {
         showResult(data);
@@ -701,22 +714,76 @@ function startAnalysis() {
     .catch(e => showInlineError('Upload failed: ' + e));
 }
 
+// Fallback timer: just moves progress bar slowly so UI doesn't look frozen
 function simulateProgress() {
   let elapsed = 0;
-  const TOTAL = 160;
+  const TOTAL = 300;
   _simTimer = setInterval(() => {
     elapsed++;
     const pct = Math.min(93, (elapsed / TOTAL) * 100);
     document.getElementById('progBar').style.width = pct + '%';
-    STAGES.forEach((s, i) => {
-      const el   = document.getElementById('st-' + s);
-      const next = STAGE_AT[i + 1] ?? TOTAL;
-      if (elapsed >= STAGE_AT[i] && elapsed < next) el.className = 'stage-tag running';
-      else if (elapsed >= next)                      el.className = 'stage-tag done';
-    });
-    const cur = STAGES.findLastIndex((_, i) => elapsed >= STAGE_AT[i]);
-    if (cur >= 0) setProgress(pct, STAGE_MSG[cur] + '…', 'Elapsed: ' + elapsed + 's');
   }, 1000);
+}
+
+// Apply stage info from the real pipeline callback
+let _elapsed = 0;
+function applyStage(stage, partial) {
+  _elapsed++;
+  const label = stageLabel(stage);
+  const chip  = stageChip(stage);
+  const dones = stageDones(stage);
+
+  if (label) setProgress(null, label, 'Elapsed: ~' + _elapsed + 's · auto-updating');
+  if (chip)  document.getElementById('st-' + chip).className = 'stage-tag running';
+  if (dones) dones.forEach(c => {
+    document.getElementById('st-' + c).className = 'stage-tag done';
+  });
+}
+
+function stageLabel(s) {
+  if (!s) return null;
+  if (s === 'metadata')        return 'Checking metadata…';
+  if (s === 'extraction')      return 'Extracting frames and faces…';
+  if (s === 'visual')          return 'Starting visual analysis…';
+  if (s.startsWith('visual:')) return 'Visual model: ' + s.split(':')[1] + '…';
+  if (s === 'visual_done')     return 'Visual analysis complete';
+  if (s === 'audio')           return 'Analyzing audio…';
+  if (s === 'audio_done')      return 'Audio analysis complete';
+  if (s === 'temporal')        return 'Temporal consistency check…';
+  if (s === 'temporal_done')   return 'Temporal analysis complete';
+  if (s === 'lipsync')         return 'Lip-sync correlation…';
+  if (s === 'lipsync_done')    return 'Lip-sync analysis complete';
+  if (s === 'spn')             return 'SPN noise fingerprint…';
+  if (s === 'spn_done')        return 'SPN analysis complete';
+  if (s === 'forensic')        return 'Running forensic rules…';
+  if (s === 'forensic_done')   return 'Forensic analysis complete';
+  if (s === 'combining')       return 'Combining all signals…';
+  if (s === 'done')            return 'Analysis complete';
+  return s;
+}
+
+function stageChip(s) {
+  if (!s) return null;
+  if (s.startsWith('metadata'))  return 'meta';
+  if (s.startsWith('visual'))    return 'visual';
+  if (s.startsWith('audio'))     return 'audio';
+  if (s.startsWith('temporal'))  return 'temporal';
+  if (s.startsWith('lipsync'))   return 'lipsync';
+  if (s.startsWith('spn'))       return 'spn';
+  if (s.startsWith('forensic'))  return 'forensic';
+  return null;
+}
+
+function stageDones(s) {
+  if (s === 'metadata_done' || s === 'extraction_done') return ['meta'];
+  if (s === 'visual_done')    return ['meta', 'visual'];
+  if (s === 'audio_done')     return ['meta', 'visual', 'audio'];
+  if (s === 'temporal_done')  return ['meta', 'visual', 'audio', 'temporal'];
+  if (s === 'lipsync_done')   return ['meta', 'visual', 'audio', 'temporal', 'lipsync'];
+  if (s === 'spn_done')       return ['meta', 'visual', 'audio', 'temporal', 'lipsync', 'spn'];
+  if (s === 'forensic_done' || s === 'combining' || s === 'done')
+    return ['meta', 'visual', 'audio', 'temporal', 'lipsync', 'spn', 'forensic'];
+  return null;
 }
 
 function setProgress(pct, stage, detail) {
@@ -729,20 +796,24 @@ function pollJob(jobId) {
   _pollCount++;
   if (_pollCount > MAX_POLLS) {
     clearInterval(_pollTimer); clearInterval(_simTimer);
-    showInlineError('Timeout: analysis exceeded 10 minutes. Server may have restarted. Try again.');
+    showInlineError('Timeout (10 min). Server may have restarted. Try again.');
     return;
   }
   fetch('/jobs/' + jobId)
     .then(r => {
       if (r.status === 404) {
         clearInterval(_pollTimer); clearInterval(_simTimer);
-        showInlineError('Server restarted mid-analysis (out of memory). Upload again.');
+        showInlineError('Server restarted mid-analysis (out of memory). Upload again.\nTip: ensure LOW_MEM=1 is set in Railway Variables.');
         return null;
       }
       return r.json();
     })
     .then(data => {
       if (!data) return;
+
+      // Show real stage from server
+      if (data.stage) applyStage(data.stage, data.partial_scores || {});
+
       if (data.status === 'done') {
         clearInterval(_pollTimer); clearInterval(_simTimer);
         STAGES.forEach(s => document.getElementById('st-' + s).className = 'stage-tag done');

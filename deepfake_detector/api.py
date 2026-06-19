@@ -88,18 +88,24 @@ def _tmp(suffix):
 
 def _run_video_job(job_id: str, path: str, filename: str):
     with _jobs_lock:
-        _jobs[job_id]["status"] = "running"
+        _jobs[job_id].update({"status": "running", "stage": "starting", "partial_scores": {}})
+
+    def on_stage(stage: str, partial: dict):
+        with _jobs_lock:
+            _jobs[job_id]["stage"]          = stage
+            _jobs[job_id]["partial_scores"] = partial
+
     try:
         from pipeline import analyze_video as _av
-        result = _av(path, cleanup=True)
+        result = _av(path, cleanup=True, on_stage=on_stage)
         result["filename"] = filename
-        result["job_id"] = job_id
+        result["job_id"]   = job_id
         _log(result)
         with _jobs_lock:
-            _jobs[job_id].update({"status": "done", "result": result})
+            _jobs[job_id].update({"status": "done", "result": result, "stage": "done"})
     except Exception as e:
         with _jobs_lock:
-            _jobs[job_id].update({"status": "error", "error": str(e)})
+            _jobs[job_id].update({"status": "error", "error": str(e), "stage": "error"})
     finally:
         if os.path.exists(path):
             try: os.remove(path)
