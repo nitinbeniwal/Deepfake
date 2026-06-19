@@ -74,20 +74,35 @@ def meta_classify(component_scores: dict) -> dict:
         boost += 6
         reasons.append("audio+lipsync sync mismatch")
 
-    # Rule 5: Conflicting signals → reduce confidence
-    if max_s > 70 and min_s < 20 and n_total >= 4:
+    # Rule 5: Physical signal override — temporal+SPN are camera-physics signals.
+    # They cannot be fooled by visual model bias toward older deepfake styles.
+    # Gemini/Veo full-generation videos score high on these even when visual says REAL.
+    if temporal >= 90 and spn >= 60:
+        phys = round((temporal * 0.55 + spn * 0.45), 1)
+        score_override = min(99, phys + 5)
+        confidence_adj = 1.20
+        reasons.append(f"physical override: temporal {temporal:.0f}% + SPN {spn:.0f}%")
+    elif temporal >= 80 and spn >= 50:
+        boost += 15
+        confidence_adj = max(confidence_adj, 1.10)
+        reasons.append(f"physical mismatch: temporal {temporal:.0f}% + SPN {spn:.0f}%")
+
+    # Rule 6: Conflicting signals → reduce confidence ONLY when no physical override
+    # Skip this penalty if temporal or SPN already dominating (visual model is likely wrong)
+    if (max_s > 70 and min_s < 20 and n_total >= 4
+            and temporal < 80 and spn < 50 and score_override is None):
         confidence_adj = min(confidence_adj, 0.85)
         reasons.append("conflicting signals")
 
-    # Rule 6: All signals low → high real confidence
+    # Rule 7: All signals low → high real confidence
     if n_low >= max(3, n_total - 1) and mean_s < 25:
         score_override = max(0, mean_s - 5)
         confidence_adj = 1.20
         reasons.append(f"high real consensus ({n_low} signals ≤25%)")
 
-    # Rule 7: SPN + temporal both high → physical inconsistency
-    if spn >= 60 and temporal >= 60:
-        boost += 5
+    # Rule 8: SPN + temporal both moderately high → physical inconsistency boost
+    if spn >= 60 and temporal >= 60 and score_override is None:
+        boost += 8
         reasons.append("physical noise+temporal mismatch")
 
     return {

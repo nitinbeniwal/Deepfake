@@ -15,9 +15,10 @@ _AI_TAGS = (
     "google deepmind","openai","anthropic","meta ai",
 )
 
-# Encoder strings specific to AI video pipeline outputs
-_AI_ENCODERS = ("lavf58","lavf59","lavf60","lavf61",  # common ffmpeg version range used by AI tools
-                "google","goog","youtube","veo")
+# Confirmed AI platform encoders (very high confidence)
+_AI_PLATFORM_ENCODERS = ("google","goog","youtube","veo","openai","tiktok","bytedance","meta-ai")
+# FFmpeg version ranges common in AI tool pipelines (moderate confidence)
+_AI_ENCODERS = ("lavf58","lavf59","lavf60","lavf61")
 
 _SIGS = {
     b'\x00\x00\x00\x18ftyp': 'mp4', b'\x00\x00\x00\x1cftyp': 'mp4',
@@ -62,13 +63,16 @@ def analyze_video_metadata(path):
         if enc:
             el = enc.lower()
             if any(a in el for a in _AI_TAGS):
-                anom.append(f"AI platform encoder: {enc}"); score += 40
+                anom.append(f"AI platform encoder: {enc}"); score += 50
+            elif any(a in el for a in _AI_PLATFORM_ENCODERS):
+                # Google/YouTube/Veo encoder = near-certain AI platform output
+                anom.append(f"AI platform encoder (Google/Veo): {enc}"); score += 50
             elif any(a in el for a in _AI_ENCODERS):
                 anom.append(f"AI-associated encoder version: {enc}"); score += 20
             elif "lavf" in el or "lavc" in el:
-                anom.append(f"FFmpeg re-encode (common in AI tools): {enc}"); score += 8
+                anom.append(f"FFmpeg re-encode (common in AI tools): {enc}"); score += 10
         if not fmt.get("tags",{}).get("creation_time"):
-            anom.append("No creation_time (stripped)"); score += 8
+            anom.append("No creation_time (stripped)"); score += 15
 
         vids = [s for s in streams if s.get("codec_type")=="video"]
         auds = [s for s in streams if s.get("codec_type")=="audio"]
@@ -82,7 +86,7 @@ def analyze_video_metadata(path):
             meta.update({"resolution":f"{w}x{h}","bitrate":br})
             if w and h and br:
                 px = w*h
-                if br < px*0.001 or br > px*0.06: anom.append(f"Unusual bitrate {br//1000}kbps for {w}x{h}"); score += 5
+                if br < px*0.001 or br > px*0.06: anom.append(f"Unusual bitrate {br//1000}kbps for {w}x{h}"); score += 10
             fps_s = v.get("avg_frame_rate","0/1")
             try:
                 n,d = map(int,fps_s.split("/")); fps = n/d if d else 0
