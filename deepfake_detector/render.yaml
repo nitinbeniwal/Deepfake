@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: deepfake-detector-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard
+    envVars:
+      - key: TRANSFORMERS_CACHE
+        value: /tmp/hf_cache
+      - key: HF_HOME
+        value: /tmp/hf_cache
+    healthCheckPath: /health
+    disk:
+      name: model-cache
+      mountPath: /tmp/hf_cache
+      sizeGB: 10

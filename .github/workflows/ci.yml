@@ -1,0 +1,105 @@
+name: CI — Deepfake Detector
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint tools
+        run: pip install flake8
+
+      - name: Syntax check — all .py files
+        run: |
+          python - <<'EOF'
+          import ast, sys, pathlib
+          errors = []
+          for f in pathlib.Path('deepfake_detector').glob('*.py'):
+              try:
+                  ast.parse(f.read_text(encoding='utf-8'))
+              except SyntaxError as e:
+                  errors.append(f'{f}: {e}')
+          if errors:
+              [print(e) for e in errors]
+              sys.exit(1)
+          print(f'All {len(list(pathlib.Path("deepfake_detector").glob("*.py")))} files parse OK ✅')
+          EOF
+
+      - name: Check for legacy classifier_v2 imports
+        run: |
+          if grep -rn "classifier_v2" deepfake_detector/*.py; then
+            echo "ERROR: legacy 'classifier_v2' import found — use 'classifier' instead"
+            exit 1
+          fi
+          echo "No legacy imports ✅"
+
+      - name: Check text_detector has model initialization
+        run: |
+          if grep -q "_get_detector" deepfake_detector/text_detector.py; then
+            echo "text_detector model init present ✅"
+          else
+            echo "ERROR: text_detector.py is missing _get_detector() — model never loads"
+            exit 1
+          fi
+
+      - name: Flake8 style check (warn only)
+        run: |
+          flake8 deepfake_detector/*.py \
+            --max-line-length 120 \
+            --ignore=E501,W503,E302,W291 \
+            --exclude=deepfake_detector/deepfake_env/ \
+            || true
+
+      - name: Verify new modules exist
+        run: |
+          for f in metadata_analyzer forensic_rules pipeline api; do
+            [ -f "deepfake_detector/${f}.py" ] && echo "${f}.py ✅" || { echo "MISSING: ${f}.py"; exit 1; }
+          done
+
+  api-smoke-test:
+    runs-on: ubuntu-latest
+    needs: lint-and-verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FastAPI + httpx for test
+        run: pip install fastapi httpx uvicorn pydantic
+
+      - name: Smoke-test API routes parse without error
+        working-directory: deepfake_detector
+        run: |
+          python - <<'EOF'
+          # Verify the FastAPI app object is importable (routes registered)
+          import sys, importlib.util, pathlib
+          spec = importlib.util.spec_from_file_location("api", "api.py")
+          mod  = importlib.util.module_from_spec(spec)
+          # Stub heavy deps so import succeeds in CI without GPU
+          import types
+          for stub in ["pipeline","audio_classifier","text_detector","crawler","processor"]:
+              sys.modules[stub] = types.ModuleType(stub)
+          spec.loader.exec_module(mod)
+          routes = [r.path for r in mod.app.routes]
+          assert "/health" in routes, f"Missing /health route. Routes: {routes}"
+          assert "/analyze/video" in routes
+          assert "/analyze/text"  in routes
+          assert "/results"       in routes
+          print("API routes OK ✅", routes)
+          EOF

@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+venv313/
+deepfake_env/
+env/
+.env
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+*.zip
+
+# Runtime artefacts (large / generated at runtime)
+extracted_frames/
+detected_faces/
+extracted_audio/
+spectrograms/
+downloaded_content/
+_pipe_*/
+
+# Results / reports (keep schema but not data)
+results/*.csv
+results/*.jsonl
+reports/*.pdf
+reports/*.html
+
+# Model cache (hundreds of MB, re-downloaded automatically)
+*.cache/
+.cache/
+huggingface/
+transformers_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / env
+.env
+*.env
+secrets.py
+config_local.py

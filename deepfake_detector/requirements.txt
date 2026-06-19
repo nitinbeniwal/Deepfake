@@ -1,0 +1,39 @@
+# Core ML
+transformers>=4.40.0
+torch>=2.2.0
+torchvision>=0.17.0
+accelerate>=0.28.0
+
+# Vision
+opencv-python-headless>=4.9.0
+Pillow>=10.3.0
+
+# Audio
+imageio-ffmpeg>=0.4.9
+librosa>=0.10.1
+soundfile>=0.12.1
+
+# Video
+imageio>=2.34.0
+
+# API
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# Web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.3
+
+# Data
+pandas>=2.2.0
+numpy>=1.26.0
+
+# PDF reports
+reportlab>=4.1.0
+
+# Flask dashboard
+flask>=3.0.0
+
+# Misc
+tqdm>=4.66.0
