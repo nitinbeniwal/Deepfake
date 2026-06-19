@@ -1,30 +1,42 @@
 """
-classifier.py — Adaptive 3-model ensemble with TTA.
+classifier.py — Adaptive 5-model ensemble with TTA.
 
-Cascade approach for speed:
-  1. Run primary model on all frames.
-  2. If score clearly real (<20) or clearly fake (>80) → done.
-  3. If uncertain (20-80) → add secondary + tertiary models + TTA.
+3-stage cascade for maximum accuracy with controlled speed:
+  Stage 1: Primary model fast-screens all frames.
+  Stage 2: Uncertain frames (20-80%) → TTA + 2 secondary models in parallel.
+  Stage 3: Still uncertain after Stage 2 → run 2 specialist models.
 
 Models (weighted):
-  primary   prithivMLmods/Deep-Fake-Detector-v2-Model  0.40
-  secondary dima806/deepfake_vs_real_image_detection    0.35
-  tertiary  Wvolf/ViT-Deepfake-Detection                0.25
+  primary    prithivMLmods/Deep-Fake-Detector-v2-Model     0.30
+  secondary1 dima806/deepfake_vs_real_image_detection       0.25
+  secondary2 Wvolf/ViT-Deepfake-Detection                  0.20
+  specialist1 prithivMLmods/Deepfake-Detection-Exp-02-Model 0.15
+  specialist2 haywoodsloan/autotrain-deepfake-detection     0.10
+
+Specialist models only activate for genuinely uncertain frames.
+This adds accuracy without proportional latency increase.
 """
 
 import threading, statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CALIBRATION_OFFSET = 0
-UNCERTAIN_LO, UNCERTAIN_HI = 20, 80   # range that triggers ensemble
+UNCERTAIN_LO, UNCERTAIN_HI   = 20, 80   # triggers Stage 2
+STILL_UNCERTAIN_LO, STILL_HI = 35, 65   # triggers Stage 3 (tighter band)
 
 _MODELS = [
-    ("prithivMLmods/Deep-Fake-Detector-v2-Model", 0.40),
-    ("dima806/deepfake_vs_real_image_detection",   0.35),
-    ("Wvolf/ViT-Deepfake-Detection",               0.25),
+    # (model_id, weight, stage)
+    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.30, 1),
+    ("dima806/deepfake_vs_real_image_detection",        0.25, 2),
+    ("Wvolf/ViT-Deepfake-Detection",                   0.20, 2),
+    ("prithivMLmods/Deepfake-Detection-Exp-02-Model",  0.15, 3),
+    ("haywoodsloan/autotrain-deepfake-detection",       0.10, 3),
 ]
-_FAKE = ("fake","deepfake","spoof","synthetic","artificial","generated","ai","manipulat","forg")
-_REAL = ("real","genuine","authentic","human","live","bonafide","natural","original")
+
+_FAKE = ("fake","deepfake","spoof","synthetic","artificial","generated",
+         "ai","manipulat","forg","altered","tamper")
+_REAL = ("real","genuine","authentic","human","live","bonafide",
+         "natural","original","unaltered")
 
 _pipes: dict = {}
 _lock = threading.Lock()
@@ -37,10 +49,14 @@ def _get_pipe(model_id):
         with _lock:
             if model_id not in _pipes:
                 from transformers import pipeline
-                print(f"Loading: {model_id} ...")
-                _pipes[model_id] = pipeline("image-classification", model=model_id)
-                print(f"Loaded: {model_id.split('/')[-1]} OK")
-    return _pipes[model_id]
+                print(f"Loading: {model_id.split('/')[-1]} ...")
+                try:
+                    _pipes[model_id] = pipeline("image-classification", model=model_id)
+                    print(f"Loaded:  {model_id.split('/')[-1]} OK")
+                except Exception as e:
+                    print(f"SKIP:    {model_id.split('/')[-1]} — {e}")
+                    _pipes[model_id] = None
+    return _pipes.get(model_id)
 
 
 def _score(results):
@@ -54,120 +70,175 @@ def _score(results):
     if fp: return fp * 100
     if rp: return (1 - rp) * 100
     top = max(results, key=lambda r: r["score"])
-    return ((1-top["score"]) if any(t in top["label"].lower() for t in _REAL) else top["score"])*100
+    return ((1 - top["score"]) if any(t in top["label"].lower() for t in _REAL) else top["score"]) * 100
 
 
 def _tta(img):
-    """4 augmented variants for TTA."""
     from PIL import Image, ImageEnhance
     return [
         img,
         img.transpose(Image.FLIP_LEFT_RIGHT),
-        ImageEnhance.Brightness(img).enhance(0.9),
-        ImageEnhance.Brightness(img).enhance(1.1),
+        ImageEnhance.Brightness(img).enhance(0.85),
+        ImageEnhance.Brightness(img).enhance(1.15),
+        img.rotate(3),
+        img.rotate(-3),
     ]
 
 
 def _run_model(model_id, pil_images, batch_size=8):
-    """Run one model on list of PIL images. Returns list[float|None]."""
+    pipe = _get_pipe(model_id)
+    if pipe is None:
+        return [None] * len(pil_images)
     try:
-        pipe = _get_pipe(model_id)
         results = pipe(pil_images, batch_size=batch_size)
         return [_score(r) for r in results]
     except Exception as e:
         print(f"Model {model_id.split('/')[-1]} error: {e}")
-        return [None]*len(pil_images)
+        return [None] * len(pil_images)
 
 
 def _calibrate(s):
+    if s is None: return None
     return round(max(0.0, min(100.0, s - CALIBRATION_OFFSET)), 2)
+
+
+def _weighted_mean(score_map):
+    """score_map: {model_id: [scores]}. Returns per-image weighted mean."""
+    valid_models = [(mid, w, stage) for mid, w, stage in _MODELS
+                    if mid in score_map and score_map[mid]]
+    if not valid_models:
+        return None
+    tw = ws = 0.0
+    for mid, w, _ in valid_models:
+        s = score_map[mid]
+        if s is not None:
+            ws += statistics.mean(s if isinstance(s, list) else [s]) * w
+            tw += w
+    return round(ws / tw, 2) if tw else None
 
 
 def classify_faces_batch(image_paths, verbose=False):
     """
-    Adaptive ensemble. Returns list[float|None] same order as image_paths.
-    - Uncertain frames get TTA + secondary/tertiary models.
-    - Clear frames (very high or very low) use primary only.
+    3-stage adaptive ensemble. Returns list[float|None] same order as image_paths.
     """
     from PIL import Image
     from collections import defaultdict
 
-    # Load images
     valid, orig_idxs = [], []
     for i, p in enumerate(image_paths):
-        try: valid.append(Image.open(p).convert("RGB")); orig_idxs.append(i)
-        except Exception: pass
+        try:
+            valid.append(Image.open(p).convert("RGB"))
+            orig_idxs.append(i)
+        except Exception:
+            pass
 
-    final = [None]*len(image_paths)
-    if not valid: return final
+    final = [None] * len(image_paths)
+    if not valid:
+        return final
 
-    # --- Stage 1: primary model on all images ---
-    primary_id, primary_w = _MODELS[0]
+    primary_id = _MODELS[0][0]
+
+    # ── Stage 1: primary on all images ─────────────────────────────────────
     raw1 = _run_model(primary_id, valid)
-    primary_scores = [_calibrate(s) if s is not None else None for s in raw1]
+    primary_scores = [_calibrate(s) for s in raw1]
 
-    # Split: clear vs uncertain
     clear_idxs = [i for i, s in enumerate(primary_scores)
                   if s is not None and (s < UNCERTAIN_LO or s > UNCERTAIN_HI)]
     unc_idxs   = [i for i, s in enumerate(primary_scores)
                   if s is None or UNCERTAIN_LO <= s <= UNCERTAIN_HI]
 
-    # Clear → use primary score directly
     for i in clear_idxs:
         final[orig_idxs[i]] = primary_scores[i]
-        if verbose: print(f"  [primary] {image_paths[orig_idxs[i]].split('/')[-1]} → {primary_scores[i]:.1f}%")
 
     if not unc_idxs:
         return final
 
-    # --- Stage 2: uncertain frames → TTA + secondary + tertiary ---
+    # ── Stage 2: uncertain → TTA + secondary models ─────────────────────────
     unc_imgs     = [valid[i] for i in unc_idxs]
     unc_orig_idx = [orig_idxs[i] for i in unc_idxs]
 
-    # Build TTA batch
     aug_batch, aug_map = [], []
     for idx, img in enumerate(unc_imgs):
         for aug in _tta(img):
-            aug_batch.append(aug); aug_map.append(idx)
+            aug_batch.append(aug)
+            aug_map.append(idx)
 
-    # Per image per model: list of augmented scores
-    img_model_scores = defaultdict(lambda: defaultdict(list))
+    img_scores = defaultdict(lambda: defaultdict(list))
 
-    # Primary TTA scores (re-run primary on uncertain with TTA)
-    primary_tta = _run_model(primary_id, aug_batch)
-    for aug_idx, s in enumerate(primary_tta):
+    # Primary TTA on uncertain
+    for aug_idx, s in enumerate(_run_model(primary_id, aug_batch)):
         if s is not None:
-            img_model_scores[aug_map[aug_idx]][primary_id].append(s)
+            img_scores[aug_map[aug_idx]][primary_id].append(s)
 
-    # Secondary + tertiary in parallel
-    secondary_models = _MODELS[1:]
-    with ThreadPoolExecutor(max_workers=len(secondary_models)) as ex:
+    # Stage-2 models in parallel
+    stage2_models = [(mid, w) for mid, w, stage in _MODELS if stage == 2]
+    with ThreadPoolExecutor(max_workers=len(stage2_models)) as ex:
         futs = {ex.submit(_run_model, mid, aug_batch): (mid, w)
-                for mid, w in secondary_models}
+                for mid, w in stage2_models}
         for fut in as_completed(futs):
             mid, _ = futs[fut]
             for aug_idx, s in enumerate(fut.result()):
                 if s is not None:
-                    img_model_scores[aug_map[aug_idx]][mid].append(s)
+                    img_scores[aug_map[aug_idx]][mid].append(s)
 
-    # Weighted ensemble per uncertain image
+    # Compute Stage 2 scores
+    stage2_results = []
     for local_idx in range(len(unc_imgs)):
-        ws, tw = 0.0, 0.0
-        for mid, w in _MODELS:
-            augs = img_model_scores[local_idx].get(mid, [])
+        tw = ws = 0.0
+        for mid, w, _ in _MODELS[:3]:
+            augs = img_scores[local_idx].get(mid, [])
             if augs:
-                ws += statistics.mean(augs) * w; tw += w
-        if tw:
-            s = _calibrate(ws / tw)
-            final[unc_orig_idx[local_idx]] = s
-            if verbose:
-                print(f"  [ensemble+TTA] {image_paths[unc_orig_idx[local_idx]].split('/')[-1]} → {s:.1f}%")
+                ws += statistics.mean(augs) * w
+                tw += w
+        stage2_results.append(_calibrate(ws / tw) if tw else None)
+
+    # ── Stage 3: still uncertain after Stage 2 → specialist models ──────────
+    still_unc = [i for i, s in enumerate(stage2_results)
+                 if s is None or STILL_UNCERTAIN_LO <= s <= STILL_HI]
+
+    if still_unc:
+        su_imgs     = [unc_imgs[i] for i in still_unc]
+        su_aug, su_map = [], []
+        for idx, img in enumerate(su_imgs):
+            for aug in _tta(img):
+                su_aug.append(aug)
+                su_map.append(idx)
+
+        stage3_models = [(mid, w) for mid, w, stage in _MODELS if stage == 3]
+        spec_scores = defaultdict(lambda: defaultdict(list))
+
+        with ThreadPoolExecutor(max_workers=len(stage3_models)) as ex:
+            futs = {ex.submit(_run_model, mid, su_aug): (mid, w)
+                    for mid, w in stage3_models}
+            for fut in as_completed(futs):
+                mid, _ = futs[fut]
+                for aug_idx, s in enumerate(fut.result()):
+                    if s is not None:
+                        spec_scores[su_map[aug_idx]][mid].append(s)
+
+        for su_local, local_idx in enumerate(still_unc):
+            # Combine all 5 models for final uncertain score
+            tw = ws = 0.0
+            for mid, w, _ in _MODELS:
+                src = img_scores[local_idx] if _ < 3 else spec_scores[su_local]
+                augs = src.get(mid, []) if isinstance(src, dict) else []
+                if augs:
+                    ws += statistics.mean(augs) * w
+                    tw += w
+            if tw:
+                stage2_results[local_idx] = _calibrate(ws / tw)
+
+    # Write Stage 2/3 results
+    for local_idx in range(len(unc_imgs)):
+        s = stage2_results[local_idx]
+        final[unc_orig_idx[local_idx]] = s
+        if verbose and s is not None:
+            print(f"  [ensemble] {image_paths[unc_orig_idx[local_idx]].split('/')[-1]} → {s:.1f}%")
 
     return final
 
 
 def classify_face(image_path, verbose=True):
-    """Single image. Uses ensemble for uncertain scores."""
     scores = classify_faces_batch([image_path], verbose=verbose)
     return scores[0]
 

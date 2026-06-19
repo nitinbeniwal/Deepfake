@@ -324,6 +324,9 @@ class DeepfakeDetectorApp:
             for anomaly in result.get("anomalies", []):
                 self.log(self.video_log, f"  ⚠️  {anomaly}")
 
+            meta_notes = [a for a in result.get("anomalies", []) if a.startswith("Meta:")]
+            if meta_notes:
+                self.log(self.video_log, f"  Meta: {meta_notes[0]}")
             self.log(self.video_log,
                      f"Pipeline final: {score}% → {verdict}")
 

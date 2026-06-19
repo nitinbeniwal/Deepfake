@@ -193,14 +193,24 @@ def analyze_video(video_path, cleanup=True):
         final     = _combine(cs)
         anomalies = metadata.get("anomalies", []) + foren.get("anomalies", [])
 
-        # Multi-signal consensus boost: if 4+ signals all agree fake
-        if final is not None:
-            strong = sum(1 for s in cs.values() if s is not None and s >= 60)
-            if strong >= 4:
-                final = min(99, final + 5)
+        # ── Layer 3: meta-classifier decision ────────────────────────────
+        try:
+            from meta_classifier import meta_classify
+            meta_dec = meta_classify(cs)
+            if meta_dec["score_override"] is not None:
+                final = meta_dec["score_override"]
+            elif final is not None:
+                final = min(99, final + meta_dec["boost"])
+            if final is not None:
+                final = round(final * meta_dec["confidence_adj"], 2)
+                final = min(99, max(0, final))
+            if meta_dec["reason"] != "standard weighted average":
+                anomalies.append(f"Meta: {meta_dec['reason']}")
+        except Exception:
+            pass
 
         return {
-            "final_score":      final,
+            "final_score":      round(float(final), 2) if final is not None else None,
             "verdict":          _verdict(final),
             "confidence":       min(99, int(final)) if final else 0,
             "fast_path":        False,
