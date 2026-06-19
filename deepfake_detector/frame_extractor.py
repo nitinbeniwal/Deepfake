@@ -2,11 +2,6 @@ import cv2, os
 from concurrent.futures import ThreadPoolExecutor
 
 def extract_frames(video_path, output_folder, every_n_frames=None, max_frames=60):
-    try:
-        from classifier import reset_buffers; reset_buffers()
-    except Exception:
-        pass
-
     os.makedirs(output_folder, exist_ok=True)
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -30,5 +25,5 @@ def extract_frames(video_path, output_folder, every_n_frames=None, max_frames=60
     with ThreadPoolExecutor(max_workers=4) as ex:
         list(ex.map(_write, pending))
 
-    print(f"Extracted {si} frames ✅")
+    print(f"Extracted {si} frames")
     return si

@@ -30,6 +30,8 @@ app = FastAPI(
     version="2.0.0",
 )
 
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -73,18 +75,25 @@ async def analyze_video(file: UploadFile = File(...)):
 
     path = _tmp(ext)
     try:
+        data = await file.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "File too large (max 500 MB)")
         with open(path, "wb") as f:
-            f.write(await file.read())
+            f.write(data)
+        del data
         from pipeline import analyze_video as _av
         result = _av(path, cleanup=True)
         result["filename"] = file.filename
         _log(result)
         return JSONResponse(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Analysis failed: {e}")
     finally:
         if os.path.exists(path):
-            os.remove(path)
+            try: os.remove(path)
+            except OSError: pass
 
 
 # ─── audio ───────────────────────────────────────────────────────────────────

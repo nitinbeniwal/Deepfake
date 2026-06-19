@@ -78,12 +78,14 @@ def temporal_score(paths):
 
 def run_all_forensic_rules(face_paths, **_):
     if not face_paths: return {"score":0,"details":{},"anomalies":[]}
-    s = face_paths[:10]
+    s = [p for p in face_paths[:10] if cv2.imread(p) is not None]
+    if not s: return {"score":0,"details":{},"anomalies":[]}
+    n = len(s)
     scores = {
-        "frequency":   sum(freq_score(p)    for p in s)/len(s),
-        "compression": sum(compress_score(p) for p in s)/len(s),
-        "noise":       sum(noise_score(p)   for p in s)/len(s),
-        "boundary":    sum(boundary_score(p) for p in s)/len(s),
+        "frequency":   sum(freq_score(p)    for p in s)/n,
+        "compression": sum(compress_score(p) for p in s)/n,
+        "noise":       sum(noise_score(p)   for p in s)/n,
+        "boundary":    sum(boundary_score(p) for p in s)/n,
         "color":       color_score(face_paths),
         "temporal":    temporal_score(face_paths),
     }

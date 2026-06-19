@@ -64,8 +64,8 @@ jobs:
 
       - name: Verify new modules exist
         run: |
-          for f in metadata_analyzer forensic_rules pipeline api; do
-            [ -f "deepfake_detector/${f}.py" ] && echo "${f}.py ✅" || { echo "MISSING: ${f}.py"; exit 1; }
+          for f in metadata_analyzer forensic_rules pipeline api lipsync_analyzer temporal_analyzer spn_analyzer; do
+            [ -f "deepfake_detector/${f}.py" ] && echo "${f}.py OK" || { echo "MISSING: ${f}.py"; exit 1; }
           done
 
   api-smoke-test:
@@ -93,7 +93,8 @@ jobs:
           mod  = importlib.util.module_from_spec(spec)
           # Stub heavy deps so import succeeds in CI without GPU
           import types
-          for stub in ["pipeline","audio_classifier","text_detector","crawler","processor"]:
+          for stub in ["pipeline","audio_classifier","text_detector","crawler","processor",
+                       "lipsync_analyzer","temporal_analyzer","spn_analyzer","forensic_rules","metadata_analyzer"]:
               sys.modules[stub] = types.ModuleType(stub)
           spec.loader.exec_module(mod)
           routes = [r.path for r in mod.app.routes]

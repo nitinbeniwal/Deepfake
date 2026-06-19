@@ -51,13 +51,9 @@ def detect_face(image_path, output_folder):
         return None
     bbox = _detect_bbox(img)
     if bbox is None:
-        print(f"  No face: {os.path.basename(image_path)}")
         return None
     out = os.path.join(output_folder, os.path.basename(image_path))
-    result = _crop_and_save(img, bbox, out)
-    if result:
-        print(f"  Face ✅ {os.path.basename(image_path)}")
-    return result
+    return _crop_and_save(img, bbox, out)
 
 
 def detect_faces_batch(image_paths, output_folder):
@@ -70,11 +66,8 @@ def detect_faces_batch(image_paths, output_folder):
             results.append(None); continue
         bbox = _detect_bbox(img)
         if bbox is None:
-            print(f"  No face: {os.path.basename(p)}")
             results.append(None); continue
-        out  = os.path.join(output_folder, os.path.basename(p))
+        out   = os.path.join(output_folder, os.path.basename(p))
         saved = _crop_and_save(img, bbox, out)
-        if saved:
-            print(f"  Face ✅ {os.path.basename(p)}")
         results.append(saved)
     return results

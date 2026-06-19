@@ -19,9 +19,9 @@ def aggregate_results(scores, debug=True):
     if debug:
         print(f"\n{'='*50}\nFRAME ANALYSIS  ({len(valid)} frames)\n{'='*50}")
         print(f"Median {med}%  Mean {mean}%  Std {std}%")
-        print(f"🟢 Real <30%  : {lo} ({lo_p}%)")
-        print(f"🟡 Uncertain  : {mid} ({round(mid/len(valid)*100,1)}%)")
-        print(f"🔴 Fake >60%  : {hi} ({hi_p}%)")
+        print(f"Real <30% : {lo} ({lo_p}%)")
+        print(f"Uncertain : {mid} ({round(mid/len(valid)*100,1)}%)")
+        print(f"Fake >60% : {hi} ({hi_p}%)")
 
     if   med >= 70 and hi_p >= 50: verdict, conf = "🚨 LIKELY FAKE",                  min(99, int(med + hi_p/2))
     elif med >= 60 and hi_p >= 40: verdict, conf = "⚠️  LIKELY FAKE — review needed",  int(med)
@@ -38,10 +38,13 @@ def aggregate_results(scores, debug=True):
             "details": {"real_frames": lo, "uncertain_frames": mid, "fake_frames": hi}}
 
 
-def aggregate_multimodal(visual, audio=None, forensic=None, metadata=None, debug=True):
-    """Weighted combination: visual 45%, audio 25%, forensic 20%, metadata 10%."""
-    parts = [("visual", visual, 0.45), ("audio", audio, 0.25),
-             ("forensic", forensic, 0.20), ("metadata", metadata, 0.10)]
+def aggregate_multimodal(visual, audio=None, forensic=None, metadata=None,
+                         temporal=None, lipsync=None, spn=None, debug=True):
+    """Weighted combination matching pipeline.py 7-signal weights."""
+    parts = [("visual",   visual,   0.40), ("audio",    audio,    0.18),
+             ("temporal", temporal, 0.12), ("lipsync",  lipsync,  0.10),
+             ("spn",      spn,      0.10), ("forensic", forensic, 0.07),
+             ("metadata", metadata, 0.03)]
     tw = ws = 0.0
     for _, s, w in parts:
         if s is not None:

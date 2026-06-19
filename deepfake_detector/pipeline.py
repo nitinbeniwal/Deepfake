@@ -137,7 +137,7 @@ def analyze_video(video_path, cleanup=True):
     Returns dict: final_score, verdict, confidence, fast_path, component_scores,
                   components, anomalies, timestamp, video_path.
     """
-    wdir = f"_pipe_{os.getpid()}_{threading.get_ident()}"
+    wdir = os.path.abspath(f"_pipe_{os.getpid()}_{threading.get_ident()}")
     os.makedirs(wdir, exist_ok=True)
 
     try:
