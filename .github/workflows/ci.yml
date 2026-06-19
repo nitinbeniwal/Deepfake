@@ -94,7 +94,7 @@ jobs:
           # Stub heavy deps so import succeeds in CI without GPU
           import types
           for stub in ["pipeline","audio_classifier","text_detector","crawler","processor",
-                       "lipsync_analyzer","temporal_analyzer","spn_analyzer","forensic_rules","metadata_analyzer"]:
+                       "lipsync_analyzer","temporal_analyzer","spn_analyzer","forensic_rules","metadata_analyzer","web_ui"]:
               sys.modules[stub] = types.ModuleType(stub)
           spec.loader.exec_module(mod)
           routes = [r.path for r in mod.app.routes]

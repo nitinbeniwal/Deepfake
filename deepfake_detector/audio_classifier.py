@@ -17,7 +17,7 @@ def _get_pipe():
                 from transformers import pipeline
                 print(f"Loading audio model: {AUDIO_MODEL} ...")
                 _pipe = pipeline("audio-classification", model=AUDIO_MODEL)
-                print("Audio model loaded ✅")
+                print("Audio model loaded")
     return _pipe
 
 def _score(results):
