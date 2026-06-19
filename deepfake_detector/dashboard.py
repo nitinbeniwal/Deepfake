@@ -12,6 +12,7 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB upload limit
 
 RESULTS_FILE  = "results/scan_results.csv"
 APPROVED_FILE = "results/approved_removals.csv"
+API_BASE      = os.environ.get("API_BASE", "http://localhost:8000")
 
 # ── SOC Dashboard HTML ────────────────────────────────────────────────────────
 TEMPLATE = """<!DOCTYPE html>
@@ -278,11 +279,11 @@ TEMPLATE = """<!DOCTYPE html>
       </div>
       <div class="nav-section">
         <div class="nav-label">System</div>
-        <a class="nav-item" href="http://localhost:8000/docs" target="_blank">
-          <span class="nav-icon">⊞</span> API Docs
+        <a class="nav-item" href="{{ api_base | e }}/docs" target="_blank">
+          <span class="nav-icon">&#8862;</span> API Docs
         </a>
-        <a class="nav-item" href="http://localhost:8000/health" target="_blank">
-          <span class="nav-icon">♡</span> Health Check
+        <a class="nav-item" href="{{ api_base | e }}/health" target="_blank">
+          <span class="nav-icon">&#9825;</span> Health Check
         </a>
       </div>
       <div class="sidebar-footer">
@@ -416,26 +417,31 @@ TEMPLATE = """<!DOCTYPE html>
       <div class="panel" id="upload">
         <div class="panel-header">
           <div class="panel-title">QUICK SCAN</div>
-          <span style="font-size:11px;color:var(--text2)">Upload a file for immediate analysis via API</span>
+          <span style="font-size:11px;color:var(--text2)">Upload video · async analysis · auto-polls result</span>
         </div>
         <div style="padding:20px">
-          <form id="scanForm" action="http://localhost:8000/analyze/video"
-                method="post" enctype="multipart/form-data"
-                target="_blank" style="display:flex;gap:12px;align-items:center">
+          <div style="display:flex;gap:12px;align-items:center">
             <label style="flex:1;display:flex;align-items:center;gap:10px;
                           border:1px dashed var(--border);border-radius:8px;
                           padding:12px 16px;cursor:pointer;color:var(--text2);font-size:12px;
-                          background:var(--bg);transition:border-color .15s">
-              <span>📁</span>
-              <span id="fileLabel">Choose video file (MP4, AVI, MOV, MKV)…</span>
-              <input type="file" name="file" accept="video/*"
+                          background:var(--bg);transition:border-color .15s" id="fileLabel">
+              <span>&#128193;</span>
+              <span id="fileLabelText">Choose video file (MP4, AVI, MOV, MKV)…</span>
+              <input type="file" id="videoFile" accept="video/*"
                      style="position:absolute;opacity:0;width:1px"
-                     onchange="document.getElementById('fileLabel').textContent=this.files[0]?.name||'Choose file…'">
+                     onchange="document.getElementById('fileLabelText').textContent=this.files[0]?.name||'Choose file…'">
             </label>
-            <button type="submit" class="scan-btn">▶ ANALYZE</button>
-          </form>
+            <button class="scan-btn" onclick="submitScan()">&#9654; ANALYZE</button>
+          </div>
+          <!-- Status panel -->
+          <div id="scanStatus" style="display:none;margin-top:14px;padding:14px;
+               background:var(--bg);border:1px solid var(--border);border-radius:8px;
+               font-family:var(--mono);font-size:12px;">
+            <div id="statusText" style="color:var(--cyan)">Submitting…</div>
+            <div id="resultBox" style="display:none;margin-top:12px"></div>
+          </div>
           <p style="margin-top:10px;font-size:11px;color:var(--muted)">
-            Results will open in API response tab. For full GUI, launch <code style="color:var(--cyan)">python gui.py</code>
+            Analysis runs async (models load on first use — may take 1-3 min). Poll interval: 5s.
           </p>
         </div>
       </div>
@@ -451,6 +457,88 @@ TEMPLATE = """<!DOCTYPE html>
     if (el) el.textContent = new Date().toLocaleTimeString('en-US', {hour12: false});
   }
   tick(); setInterval(tick, 1000);
+
+  // Async scan
+  const API_BASE = '{{ api_base | e }}';
+  let _pollTimer = null;
+
+  function submitScan() {
+    const fi = document.getElementById('videoFile');
+    if (!fi.files.length) { alert('Select a video file first.'); return; }
+    const fd = new FormData();
+    fd.append('file', fi.files[0]);
+    document.getElementById('scanStatus').style.display = 'block';
+    document.getElementById('statusText').textContent = 'Submitting to ' + API_BASE + '…';
+    document.getElementById('resultBox').style.display = 'none';
+
+    fetch(API_BASE + '/analyze/video', {method:'POST', body:fd})
+      .then(r => r.json())
+      .then(data => {
+        if (data.job_id) {
+          document.getElementById('statusText').textContent =
+            'Job submitted: ' + data.job_id + ' · polling every 5s…';
+          _pollTimer = setInterval(() => pollJob(data.job_id), 5000);
+        } else {
+          showResult(data);
+        }
+      })
+      .catch(e => {
+        document.getElementById('statusText').style.color = 'var(--red)';
+        document.getElementById('statusText').textContent = 'Submit failed: ' + e;
+      });
+  }
+
+  function pollJob(jobId) {
+    fetch(API_BASE + '/jobs/' + jobId)
+      .then(r => r.json())
+      .then(data => {
+        const s = data.status;
+        document.getElementById('statusText').textContent =
+          'Job ' + jobId.slice(0,8) + '… · Status: ' + s.toUpperCase();
+        if (s === 'done') {
+          clearInterval(_pollTimer);
+          showResult(data.result);
+        } else if (s === 'error') {
+          clearInterval(_pollTimer);
+          document.getElementById('statusText').style.color = 'var(--red)';
+          document.getElementById('statusText').textContent = 'Error: ' + (data.error || 'unknown');
+        }
+      })
+      .catch(() => {});
+  }
+
+  function showResult(r) {
+    const verdict = r.verdict || 'UNKNOWN';
+    const score   = r.final_score != null ? r.final_score.toFixed(1) : '–';
+    const color   = verdict === 'FAKE' ? 'var(--red)' :
+                    verdict === 'REAL' ? 'var(--green)' : 'var(--yellow)';
+    const box = document.getElementById('resultBox');
+    box.style.display = 'block';
+    box.innerHTML = `
+      <div style="display:flex;gap:16px;align-items:center;margin-bottom:10px">
+        <span style="font-size:22px;font-weight:900;color:${color}">${verdict}</span>
+        <span style="font-size:18px;color:${color}">${score}%</span>
+        ${r.fast_path ? '<span style="font-size:10px;color:var(--muted);background:var(--bg3);padding:2px 6px;border-radius:4px">FAST-PATH</span>' : ''}
+      </div>
+      <div style="color:var(--text2);margin-bottom:8px">${r.filename || ''}</div>
+      ${renderComponents(r.component_scores)}
+      ${(r.anomalies||[]).length ? '<div style="margin-top:8px;color:var(--muted);font-size:11px">' +
+        r.anomalies.slice(0,5).map(a=>'⚑ '+a).join('<br>') + '</div>' : ''}`;
+    document.getElementById('statusText').textContent = 'Analysis complete.';
+    document.getElementById('statusText').style.color = 'var(--green)';
+  }
+
+  function renderComponents(cs) {
+    if (!cs) return '';
+    const order = ['visual','audio','temporal','lipsync','spn','forensic','metadata'];
+    return '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">' +
+      order.filter(k => cs[k] != null).map(k => {
+        const v = cs[k].toFixed(0);
+        const c = v >= 70 ? 'var(--red)' : v >= 35 ? 'var(--yellow)' : 'var(--green)';
+        return `<span style="padding:2px 8px;border-radius:4px;border:1px solid ${c};
+                color:${c};font-size:10px;text-transform:uppercase">${k} ${v}%</span>`;
+      }).join('') + '</div>';
+  }
 </script>
 </body>
 </html>"""
@@ -497,6 +585,7 @@ def index():
         flagged_count=fake_count,
         threat_class=threat_class, threat_label=threat_label,
         now=datetime.now().strftime("%H:%M:%S UTC"),
+        api_base=API_BASE,
     )
 
 
@@ -515,6 +604,7 @@ def review_queue():
         approved=0, fake_pct=0, real_pct=0, flagged_count=len(flagged),
         threat_class="threat-high", threat_label="REVIEW QUEUE",
         now=datetime.now().strftime("%H:%M:%S UTC"),
+        api_base=API_BASE,
     )
 
 
