@@ -17,10 +17,11 @@ Specialist models only activate for genuinely uncertain frames.
 This adds accuracy without proportional latency increase.
 """
 
-import threading, statistics
+import os, threading, statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CALIBRATION_OFFSET = 0
+_LOW_MEM = os.environ.get("LOW_MEM", "0") == "1"  # Railway free tier: 1 model only
 UNCERTAIN_LO, UNCERTAIN_HI   = 20, 80   # triggers Stage 2
 STILL_UNCERTAIN_LO, STILL_HI = 35, 65   # triggers Stage 3 (tighter band)
 
@@ -149,6 +150,12 @@ def classify_faces_batch(image_paths, verbose=False):
 
     for i in clear_idxs:
         final[orig_idxs[i]] = primary_scores[i]
+
+    # In low-memory mode, stage 1 result is final — skip loading more models
+    if _LOW_MEM:
+        for i in unc_idxs:
+            final[orig_idxs[i]] = primary_scores[i]
+        return final
 
     if not unc_idxs:
         return final

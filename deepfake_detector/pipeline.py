@@ -26,6 +26,8 @@ import os, shutil, threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+_LOW_MEM = os.environ.get("LOW_MEM", "0") == "1"
+
 W = {
     "visual":   0.40,
     "audio":    0.18,
@@ -161,11 +163,15 @@ def analyze_video(video_path, cleanup=True):
             }
 
         # ── Stage 1: parallel visual + audio ──────────────────────────────
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            vis_f = ex.submit(_visual, video_path, wdir)
-            aud_f = ex.submit(_audio,  video_path)
-            vis   = vis_f.result()
-            aud   = aud_f.result()
+        if _LOW_MEM:
+            vis = _visual(video_path, wdir)
+            aud = {"score": None, "skipped": "LOW_MEM"}
+        else:
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                vis_f = ex.submit(_visual, video_path, wdir)
+                aud_f = ex.submit(_audio,  video_path)
+                vis   = vis_f.result()
+                aud   = aud_f.result()
 
         face_paths  = vis.get("face_paths",  [])
         frame_paths = vis.get("frame_paths", [])

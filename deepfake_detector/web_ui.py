@@ -353,7 +353,8 @@ function setFile(f) {
 }
 
 // Scan flow
-let _poll = null, _sim = null;
+let _poll = null, _sim = null, _pollCount = 0;
+const MAX_POLLS = 150; // 10 minutes at 4s interval
 
 function startScan() {
   if (!_file) return;
@@ -368,6 +369,7 @@ function startScan() {
   });
   setProgress(0, 'Uploading file…', 'Connecting to server');
 
+  _pollCount = 0;
   const fd = new FormData();
   fd.append('file', _file);
 
@@ -428,7 +430,21 @@ function setProgress(pct, title, sub) {
 }
 
 function pollJob(jobId) {
-  fetch('/jobs/' + jobId).then(r => r.json()).then(data => {
+  _pollCount++;
+  if (_pollCount > MAX_POLLS) {
+    clearInterval(_poll); clearInterval(_sim);
+    showError('Timeout: analysis took too long. Server may have restarted. Try uploading again.');
+    return;
+  }
+  fetch('/jobs/' + jobId).then(r => {
+    if (r.status === 404) {
+      clearInterval(_poll); clearInterval(_sim);
+      showError('Server restarted during analysis (out-of-memory). Please upload and try again.');
+      return null;
+    }
+    return r.json();
+  }).then(data => {
+    if (!data) return;
     if (data.status === 'done') {
       clearInterval(_poll); clearInterval(_sim);
       STAGES.forEach(s => document.getElementById('ch-' + s).className = 'chip done');
