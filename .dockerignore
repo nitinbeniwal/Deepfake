@@ -1,0 +1,39 @@
+# Virtual environments
+deepfake_detector/venv/
+deepfake_detector/venv313/
+deepfake_detector/deepfake_env/
+deepfake_detector/.venv/
+
+# Python cache
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+
+# Runtime artefacts (generated at runtime, not part of image)
+deepfake_detector/extracted_frames/
+deepfake_detector/detected_faces/
+deepfake_detector/extracted_audio/
+deepfake_detector/spectrograms/
+deepfake_detector/downloaded_content/
+deepfake_detector/_pipe_*/
+deepfake_detector/results/
+deepfake_detector/reports/
+deepfake_detector/*.zip
+
+# HuggingFace model cache (mount as volume, don't bake in)
+**/.cache/
+**/huggingface/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.github/
+
+# Secrets
+**/.env
+**/secrets.py
