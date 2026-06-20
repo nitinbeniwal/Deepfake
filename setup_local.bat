@@ -55,10 +55,14 @@ if errorlevel 1 (
 )
 echo numpy OK.
 
-REM ---- STEP 2: Install facenet-pytorch without strict numpy constraint ----
+REM ---- STEP 2: Install facenet-pytorch bypassing its numpy<2 constraint ----
+REM facenet-pytorch declares numpy<2 in metadata, which forces pip to select
+REM numpy 1.26.4 (no Python 3.13 wheel, needs C compiler -> fails).
+REM --no-deps installs the package itself without enforcing its dep metadata.
+REM torch, torchvision, Pillow, requests are installed by requirements.txt anyway.
 echo.
-echo Step 2/3: Installing facenet-pytorch...
-pip install "facenet-pytorch>=2.5.3" --quiet
+echo Step 2/3: Installing facenet-pytorch (bypassing numpy version constraint)...
+pip install "facenet-pytorch>=2.5.3" --no-deps --quiet
 if errorlevel 1 (
     echo ERROR: facenet-pytorch install failed.
     pause
