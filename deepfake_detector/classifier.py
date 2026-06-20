@@ -72,22 +72,28 @@ class _XceptionWrapper:
     """
     Xception CNN via timm. Mimics HF pipeline __call__ interface.
     Designed for FaceForensics++ deepfake detection (299×299 input).
-    Drop xception_deepfake.pt (DF40 or FF++ fine-tuned weights) to activate.
+
+    Checkpoint: auto-downloaded from DeepfakeBench GitHub releases at startup
+    (xception_best.pth, trained on FF++, 97%+ AUC on within-dataset eval).
+    Smart key remapping handles DeepfakeBench's backbone. wrapper structure.
     """
 
     def __init__(self):
-        import timm, torch
+        import timm
         from torchvision import transforms
         print("Loading: xception (timm) ...")
         self.model = timm.create_model("xception", pretrained=True, num_classes=2)
+
         if os.path.exists(_XCEPTION_CKPT):
-            state = torch.load(_XCEPTION_CKPT, map_location="cpu")
-            missing, _ = self.model.load_state_dict(state, strict=False)
-            if missing:
-                print(f"Xception ckpt: {len(missing)} missing keys (head differs — fine)")
-            print("Xception: fine-tuned deepfake checkpoint loaded")
+            from model_downloader import try_load_checkpoint
+            matched = try_load_checkpoint(self.model, _XCEPTION_CKPT)
+            if matched > 0:
+                print(f"Xception: DeepfakeBench checkpoint loaded ({matched} params matched)")
+            else:
+                print("Xception: checkpoint present but no keys matched — using ImageNet backbone")
         else:
-            print("Xception: no checkpoint — ImageNet pretrained (neutral until DF40/FF++ weights provided)")
+            print("Xception: checkpoint not yet downloaded — using ImageNet pretrained")
+
         self.model.eval()
         self.transform = transforms.Compose([
             transforms.Resize((299, 299)),
@@ -148,22 +154,28 @@ class _EfficientNetWrapper:
     """
     EfficientNet-B4 CNN via timm. Mimics HF pipeline __call__ interface.
     DeepfakeBench top performer on FF++ (97% AUC). 380×380 input.
-    Drop efficientnet_b4_deepfake.pt (DeepfakeBench weights) to activate.
+
+    Checkpoint: auto-downloaded from DeepfakeBench GitHub releases at startup
+    (effnb4_best.pth, trained on FF++).
+    Smart key remapping handles any wrapper prefix differences.
     """
 
     def __init__(self):
-        import timm, torch
+        import timm
         from torchvision import transforms
         print("Loading: efficientnet_b4 (timm) ...")
         self.model = timm.create_model("efficientnet_b4", pretrained=True, num_classes=2)
+
         if os.path.exists(_EFFICIENTNET_CKPT):
-            state = torch.load(_EFFICIENTNET_CKPT, map_location="cpu")
-            missing, _ = self.model.load_state_dict(state, strict=False)
-            if missing:
-                print(f"EfficientNet-B4 ckpt: {len(missing)} missing keys")
-            print("EfficientNet-B4: fine-tuned deepfake checkpoint loaded")
+            from model_downloader import try_load_checkpoint
+            matched = try_load_checkpoint(self.model, _EFFICIENTNET_CKPT)
+            if matched > 0:
+                print(f"EfficientNet-B4: DeepfakeBench checkpoint loaded ({matched} params matched)")
+            else:
+                print("EfficientNet-B4: checkpoint present but no keys matched — using ImageNet backbone")
         else:
-            print("EfficientNet-B4: no checkpoint — ImageNet pretrained (neutral until DeepfakeBench weights provided)")
+            print("EfficientNet-B4: checkpoint not yet downloaded — using ImageNet pretrained")
+
         self.model.eval()
         self.transform = transforms.Compose([
             transforms.Resize((380, 380)),

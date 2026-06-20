@@ -72,6 +72,12 @@ def _preload_models():
 
 @app.on_event("startup")
 async def startup():
+    # Download DeepfakeBench checkpoints (Xception + EfficientNet-B4) in background
+    try:
+        from model_downloader import ensure_checkpoints
+        ensure_checkpoints(blocking=False)
+    except Exception as e:
+        print(f"Checkpoint downloader skipped: {e}")
     threading.Thread(target=_preload_models, daemon=True).start()
 
 
@@ -330,6 +336,53 @@ async def submit_feedback(req: FeedbackReq):
     with open(os.path.join(RESULTS_DIR, "feedback.jsonl"), "a") as f:
         f.write(json.dumps(entry) + "\n")
     return JSONResponse({"status": "ok", "id": entry["id"]})
+
+
+@app.post("/analyze/gradcam")
+async def analyze_gradcam(
+    file: UploadFile = File(...),
+    model_type: str = "xception",
+):
+    """
+    Generate Grad-CAM forensic heatmap for a face image.
+    Shows which facial regions triggered the FAKE classification.
+    Use for evidence documentation in law enforcement reports.
+
+    model_type: "xception" (default) or "efficientnet_b4"
+    Returns: fake_probability + base64 PNG heatmap overlay.
+    """
+    if model_type not in ("xception", "efficientnet_b4"):
+        raise HTTPException(400, "model_type must be 'xception' or 'efficientnet_b4'")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+        raise HTTPException(400, f"Unsupported image type '{ext}'")
+
+    path = _tmp(ext)
+    try:
+        data = await file.read()
+        if len(data) > 20 * 1024 * 1024:
+            raise HTTPException(413, "Image too large (max 20MB)")
+        with open(path, "wb") as f:
+            f.write(data)
+        del data
+
+        from gradcam_engine import gradcam_for_image
+        result = gradcam_for_image(path, model_type=model_type)
+        if "error" in result:
+            raise HTTPException(503, result["error"])
+        result["filename"] = file.filename
+        result["timestamp"] = datetime.now().isoformat()
+        return JSONResponse(result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Grad-CAM failed: {e}")
+    finally:
+        if os.path.exists(path):
+            try: os.remove(path)
+            except OSError: pass
 
 
 @app.get("/feedback/stats")
