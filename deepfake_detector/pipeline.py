@@ -252,9 +252,9 @@ def analyze_video(video_path, cleanup=True, on_stage=None):
         step("spn")
         try:
             from spn_analyzer import spn_score
-            cs["spn"] = spn_score(frame_paths)
+            cs["spn"] = spn_score(frame_paths)  # returns None when signal unreliable
         except Exception as e:
-            cs["spn"] = 0
+            cs["spn"] = None  # error → exclude from ensemble (not treat as REAL)
             components["spn_error"] = str(e)
         components["spn"] = {"score": cs["spn"]}
         step("spn_done", dict(cs))

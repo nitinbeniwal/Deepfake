@@ -65,6 +65,7 @@ def reset_buffers(): return None
 
 _xception_instance = None
 _xception_lock     = threading.Lock()
+_xception_ckpt_valid = None  # None=unknown, True=valid, False=no keys matched
 _XCEPTION_CKPT     = os.path.join(os.path.dirname(__file__), "xception_deepfake.pt")
 
 
@@ -73,9 +74,9 @@ class _XceptionWrapper:
     Xception CNN via timm. Mimics HF pipeline __call__ interface.
     Designed for FaceForensics++ deepfake detection (299×299 input).
 
-    Checkpoint: auto-downloaded from DeepfakeBench GitHub releases at startup
-    (xception_best.pth, trained on FF++, 97%+ AUC on within-dataset eval).
-    Smart key remapping handles DeepfakeBench's backbone. wrapper structure.
+    Only runs when a valid DeepfakeBench checkpoint is available.
+    Without matched weights, ImageNet pretrained outputs ~50% neutral — excluded
+    from the ensemble to avoid diluting real signals.
     """
 
     def __init__(self):
@@ -83,18 +84,21 @@ class _XceptionWrapper:
         from torchvision import transforms
         print("Loading: xception (timm) ...")
         self.model = timm.create_model("xception", pretrained=True, num_classes=2)
+        self._valid = False
 
         if os.path.exists(_XCEPTION_CKPT):
             from model_downloader import try_load_checkpoint
             matched = try_load_checkpoint(self.model, _XCEPTION_CKPT)
             if matched > 0:
+                self._valid = True
                 print(f"Xception: DeepfakeBench checkpoint loaded ({matched} params matched)")
             else:
-                print("Xception: checkpoint present but no keys matched — using ImageNet backbone")
+                print("Xception: no keys matched — excluded from ensemble (ImageNet = random ~50%)")
         else:
-            print("Xception: checkpoint not yet downloaded — using ImageNet pretrained")
+            print("Xception: checkpoint not downloaded — excluded until weights available")
 
-        self.model.eval()
+        if self._valid:
+            self.model.eval()
         self.transform = transforms.Compose([
             transforms.Resize((299, 299)),
             transforms.ToTensor(),
@@ -118,14 +122,22 @@ class _XceptionWrapper:
 
 
 def _get_xception():
-    global _xception_instance
+    global _xception_instance, _xception_ckpt_valid
+    if _xception_ckpt_valid is False:
+        return None  # already determined: no valid checkpoint
     if _xception_instance is None:
         with _xception_lock:
             if _xception_instance is None:
                 try:
-                    _xception_instance = _XceptionWrapper()
-                    print("Loaded:  xception OK")
+                    inst = _XceptionWrapper()
+                    _xception_ckpt_valid = inst._valid
+                    if inst._valid:
+                        _xception_instance = inst
+                        print("Loaded:  xception OK")
+                    else:
+                        print("SKIP:    xception — no valid checkpoint")
                 except Exception as e:
+                    _xception_ckpt_valid = False
                     print(f"SKIP:    xception — {e}")
     return _xception_instance
 
@@ -147,6 +159,7 @@ def _unload_xception():
 
 _efficientnet_instance = None
 _efficientnet_lock     = threading.Lock()
+_efficientnet_ckpt_valid = None  # None=unknown, True=valid, False=no keys matched
 _EFFICIENTNET_CKPT     = os.path.join(os.path.dirname(__file__), "efficientnet_b4_deepfake.pt")
 
 
@@ -155,9 +168,9 @@ class _EfficientNetWrapper:
     EfficientNet-B4 CNN via timm. Mimics HF pipeline __call__ interface.
     DeepfakeBench top performer on FF++ (97% AUC). 380×380 input.
 
-    Checkpoint: auto-downloaded from DeepfakeBench GitHub releases at startup
-    (effnb4_best.pth, trained on FF++).
-    Smart key remapping handles any wrapper prefix differences.
+    Only runs when a valid DeepfakeBench checkpoint is available.
+    Without matched weights, ImageNet pretrained outputs ~50% neutral — excluded
+    from the ensemble to avoid diluting real signals.
     """
 
     def __init__(self):
@@ -165,18 +178,21 @@ class _EfficientNetWrapper:
         from torchvision import transforms
         print("Loading: efficientnet_b4 (timm) ...")
         self.model = timm.create_model("efficientnet_b4", pretrained=True, num_classes=2)
+        self._valid = False
 
         if os.path.exists(_EFFICIENTNET_CKPT):
             from model_downloader import try_load_checkpoint
             matched = try_load_checkpoint(self.model, _EFFICIENTNET_CKPT)
             if matched > 0:
+                self._valid = True
                 print(f"EfficientNet-B4: DeepfakeBench checkpoint loaded ({matched} params matched)")
             else:
-                print("EfficientNet-B4: checkpoint present but no keys matched — using ImageNet backbone")
+                print("EfficientNet-B4: no keys matched — excluded from ensemble (ImageNet = random ~50%)")
         else:
-            print("EfficientNet-B4: checkpoint not yet downloaded — using ImageNet pretrained")
+            print("EfficientNet-B4: checkpoint not downloaded — excluded until weights available")
 
-        self.model.eval()
+        if self._valid:
+            self.model.eval()
         self.transform = transforms.Compose([
             transforms.Resize((380, 380)),
             transforms.ToTensor(),
@@ -200,14 +216,22 @@ class _EfficientNetWrapper:
 
 
 def _get_efficientnet():
-    global _efficientnet_instance
+    global _efficientnet_instance, _efficientnet_ckpt_valid
+    if _efficientnet_ckpt_valid is False:
+        return None  # already determined: no valid checkpoint
     if _efficientnet_instance is None:
         with _efficientnet_lock:
             if _efficientnet_instance is None:
                 try:
-                    _efficientnet_instance = _EfficientNetWrapper()
-                    print("Loaded:  efficientnet_b4 OK")
+                    inst = _EfficientNetWrapper()
+                    _efficientnet_ckpt_valid = inst._valid
+                    if inst._valid:
+                        _efficientnet_instance = inst
+                        print("Loaded:  efficientnet_b4 OK")
+                    else:
+                        print("SKIP:    efficientnet_b4 — no valid checkpoint")
                 except Exception as e:
+                    _efficientnet_ckpt_valid = False
                     print(f"SKIP:    efficientnet_b4 — {e}")
     return _efficientnet_instance
 

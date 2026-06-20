@@ -38,6 +38,33 @@ def _sig(path):
           "jpeg":{"jpg","jpeg"},"png":{"png"}}.get(det,set())
     return ext in ok, f"ext={ext} magic={det}" if ext not in ok else det
 
+def _cv2_probe(path):
+    """Minimal stream info via OpenCV when ffprobe is unavailable."""
+    try:
+        import cv2
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return None
+        fps  = cap.get(cv2.CAP_PROP_FPS)
+        nfr  = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        w    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h    = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        if not (w and h):
+            return None
+        dur = nfr / fps if fps > 0 else 0
+        return {
+            "streams": [{"codec_type": "video", "width": w, "height": h,
+                         "avg_frame_rate": f"{int(round(fps))}/1",
+                         "nb_frames": str(int(nfr))}],
+            "format":  {"duration": str(round(dur, 2)),
+                        "size": str(os.path.getsize(path)),
+                        "tags": {}},
+        }
+    except Exception:
+        return None
+
+
 def _ffprobe(path):
     try:
         import imageio_ffmpeg
@@ -47,8 +74,11 @@ def _ffprobe(path):
         r = subprocess.run([fp,"-v","quiet","-print_format","json",
                             "-show_streams","-show_format",path],
                            capture_output=True, timeout=30)
-        return json.loads(r.stdout) if r.returncode==0 else None
-    except Exception: return None
+        if r.returncode == 0:
+            return json.loads(r.stdout)
+    except Exception:
+        pass
+    return _cv2_probe(path)
 
 def analyze_video_metadata(path):
     anom, score, meta = [], 0, {}
@@ -84,9 +114,11 @@ def analyze_video_metadata(path):
             w,h = int(v.get("width",0)), int(v.get("height",0))
             br  = int(v.get("bit_rate",0) or fmt.get("bit_rate",0) or 0)
             meta.update({"resolution":f"{w}x{h}","bitrate":br})
-            if w and h and br:
-                px = w*h
-                if br < px*0.001 or br > px*0.06: anom.append(f"Unusual bitrate {br//1000}kbps for {w}x{h}"); score += 10
+            if w and h:
+                if (w,h) in _AI_SIZES: anom.append(f"AI-canvas resolution: {w}x{h}"); score += 20
+                if br:
+                    px = w*h
+                    if br < px*0.001 or br > px*0.06: anom.append(f"Unusual bitrate {br//1000}kbps for {w}x{h}"); score += 10
             fps_s = v.get("avg_frame_rate","0/1")
             try:
                 n,d = map(int,fps_s.split("/")); fps = n/d if d else 0

@@ -7,6 +7,11 @@ consistent physical sensor — inter-frame noise residuals don't correlate.
 
 Real video : mean inter-frame noise correlation  ~0.08 - 0.25
 AI video   : mean inter-frame noise correlation  ~0.00 - 0.04
+
+WhatsApp / social-media re-encoded video: heavy DCT block quantization wipes
+out the PRNU signal entirely. Residual variance < 2.0 is a reliable indicator
+of this condition — we return None so the signal is excluded from the
+weighted average rather than dragging the fake-score toward 0.
 """
 
 import cv2, numpy as np
@@ -22,16 +27,25 @@ def _noise_residual(img_bgr, size=(256, 256)):
 def spn_score(frame_paths):
     """
     Score 0-100 (higher = more likely AI-generated).
-    Needs at least 5 frames for a meaningful result.
+    Returns None when signal is unreliable (< 3 frames or heavy compression).
     """
-    residuals = []
+    residuals, variances = [], []
     for p in frame_paths[:20]:
         img = cv2.imread(p)
         if img is not None:
-            residuals.append(_noise_residual(img))
+            r = _noise_residual(img)
+            residuals.append(r)
+            variances.append(float(np.var(r)))
 
     if len(residuals) < 3:
-        return 0.0
+        return None  # insufficient frames — no signal
+
+    # Heavily compressed video (WhatsApp, Telegram, social-media re-encode) has
+    # quantization that destroys the sensor PRNU pattern.  Residual variance < 2.0
+    # means the "noise" is uniform DCT block artifacts — not usable for PRNU.
+    mean_var = float(np.mean(variances))
+    if mean_var < 2.0:
+        return None  # compression destroyed PRNU — exclude from ensemble
 
     # Compute all pairwise correlations (upper-triangle only)
     mat   = np.corrcoef(residuals)

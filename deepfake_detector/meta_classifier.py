@@ -86,6 +86,24 @@ def meta_classify(component_scores: dict) -> dict:
         boost += 15
         confidence_adj = max(confidence_adj, 1.10)
         reasons.append(f"physical mismatch: temporal {temporal:.0f}% + SPN {spn:.0f}%")
+    elif temporal >= 90:
+        # SPN=0 typically means WhatsApp/social-media re-encoding destroyed PRNU noise.
+        # Temporal GAN artifacts (inter-frame inconsistency) survive compression.
+        # Trust temporal alone when it's this high.
+        boost += 22
+        confidence_adj = max(confidence_adj, 1.15)
+        reasons.append(f"temporal override (SPN unreliable): {temporal:.0f}%")
+    elif temporal >= 80:
+        boost += 12
+        confidence_adj = max(confidence_adj, 1.08)
+        reasons.append(f"temporal high: {temporal:.0f}%")
+
+    # Rule 5c: Face-swap pattern — many deepfakes (especially WhatsApp scam videos)
+    # swap the face but keep the original audio.  Low audio score does not mean REAL;
+    # it means the audio is authentic while the face is forged.
+    if temporal >= 70 and audio <= 20 and score_override is None:
+        boost += 8
+        reasons.append(f"face-swap pattern: temporal {temporal:.0f}% + real audio ({audio:.0f}%)")
 
     # Rule 6: Conflicting signals → reduce confidence ONLY when no physical override
     # Skip this penalty if temporal or SPN already dominating (visual model is likely wrong)
