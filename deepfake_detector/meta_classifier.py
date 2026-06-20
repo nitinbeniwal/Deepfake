@@ -33,18 +33,27 @@ def meta_classify(component_scores: dict) -> dict:
     max_s       = max(scores)
     min_s       = min(scores)
 
-    visual   = cs.get("visual",   0) or 0
-    audio    = cs.get("audio",    0) or 0
-    metadata = cs.get("metadata", 0) or 0
-    lipsync  = cs.get("lipsync",  0) or 0
-    temporal = cs.get("temporal", 0) or 0
-    spn      = cs.get("spn",      0) or 0
-    forensic = cs.get("forensic", 0) or 0
+    visual    = cs.get("visual",    0) or 0
+    audio     = cs.get("audio",    0) or 0
+    metadata  = cs.get("metadata", 0) or 0
+    lipsync   = cs.get("lipsync",  0) or 0
+    temporal  = cs.get("temporal", 0) or 0
+    spn       = cs.get("spn",      0) or 0
+    forensic  = cs.get("forensic", 0) or 0
+    frequency = cs.get("frequency",0) or 0
 
     boost = 0.0
     confidence_adj = 1.0
     score_override = None
     reasons = []
+
+    # Rule 0: Temporal maximum — hard override
+    # temporal >= 95% means EVERY sampled frame pair shows GAN inter-frame inconsistency.
+    # This is effectively impossible in genuine video. Override immediately.
+    if temporal >= 95:
+        score_override = min(99, round(temporal * 0.90 + 8, 1))
+        confidence_adj = 1.25
+        reasons.append(f"temporal maximum ({temporal:.0f}%): GAN artifacts confirmed")
 
     # Rule 1: Strong consensus — 4+ signals all agree fake
     if n_very_high >= 4:
@@ -122,6 +131,15 @@ def meta_classify(component_scores: dict) -> dict:
     if spn >= 60 and temporal >= 60 and score_override is None:
         boost += 8
         reasons.append("physical noise+temporal mismatch")
+
+    # Rule 9: Frequency / texture signal
+    if frequency >= 60 and score_override is None:
+        boost += 10
+        confidence_adj = max(confidence_adj, 1.08)
+        reasons.append(f"frequency/texture anomaly: {frequency:.0f}%")
+    elif frequency >= 40 and score_override is None:
+        boost += 5
+        reasons.append(f"mild texture anomaly: {frequency:.0f}%")
 
     return {
         "score_override": score_override,

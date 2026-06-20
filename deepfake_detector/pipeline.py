@@ -29,13 +29,14 @@ _LOW_MEM = os.environ.get("LOW_MEM", "0") == "1"
 _META_FAST_THRESHOLD = 55
 
 W = {
-    "visual":   0.40,
-    "audio":    0.18,
-    "temporal": 0.12,
-    "lipsync":  0.10,
-    "spn":      0.10,
-    "forensic": 0.07,
-    "metadata": 0.03,
+    "visual":    0.35,
+    "audio":     0.15,
+    "temporal":  0.15,   # increased — most reliable signal for WhatsApp deepfakes
+    "lipsync":   0.10,
+    "spn":       0.08,
+    "forensic":  0.07,
+    "frequency": 0.07,   # new signal — texture + spectral analysis
+    "metadata":  0.03,
 }
 
 
@@ -49,8 +50,8 @@ def _combine(cs):
     meta = cs.get("metadata") or 0
     wts  = dict(W)
     if meta < 5:
-        wts["forensic"] = round(W["forensic"] + 0.02, 3)
-        wts["temporal"] = round(W["temporal"] + 0.01, 3)
+        wts["forensic"] = round(W.get("forensic", 0) + 0.02, 3)
+        wts["temporal"] = round(W.get("temporal", 0) + 0.01, 3)
         wts["metadata"] = 0.0
     tw = ws = 0.0
     for k, wt in wts.items():
@@ -180,11 +181,15 @@ def analyze_video(video_path, cleanup=True, on_stage=None):
                                 scores = [_calibrate(_cls_score(r)) for r in raw]
                                 valid  = [s for s in scores if s is not None]
                                 if valid:
-                                    model_accum[model_id] = (_stats.mean(valid), weight)
+                                    ms = round(_stats.mean(valid), 1)
+                                    model_accum[model_id] = (ms, weight)
+                                    print(f"  [visual:{short}] {ms:.1f}% ({len(valid)} faces, w={weight})")
+                            else:
+                                print(f"  [visual:{short}] SKIPPED (no checkpoint / load failed)")
                         del pils
                     except Exception as ex:
                         short = model_id.split("/")[-1] if "/" in model_id else model_id
-                        print(f"Visual model {short} error: {ex}")
+                        print(f"  [visual:{short}] ERROR: {ex}")
                     finally:
                         _unload_hf(model_id)
 
@@ -258,6 +263,18 @@ def analyze_video(video_path, cleanup=True, on_stage=None):
             components["spn_error"] = str(e)
         components["spn"] = {"score": cs["spn"]}
         step("spn_done", dict(cs))
+        gc.collect()
+
+        # ── Step 6b: Frequency / texture analysis (numpy + cv2, no ML) ─────
+        step("frequency")
+        try:
+            from frequency_analyzer import frequency_score
+            cs["frequency"] = frequency_score(face_paths)
+        except Exception as e:
+            cs["frequency"] = None
+            components["frequency_error"] = str(e)
+        components["frequency"] = {"score": cs["frequency"]}
+        step("frequency_done", dict(cs))
         gc.collect()
 
         # ── Step 7: Forensic rules (numpy + PIL, no ML) ───────────────────

@@ -39,15 +39,15 @@ _EFFICIENTNET_ID = "timm:efficientnet_b4_deepfake"
 
 _MODELS = [
     # (model_id, weight, stage)   — weights sum to 1.0
-    # HuggingFace ViT models
-    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.12, 1),
-    ("dima806/deepfake_vs_real_image_detection",        0.10, 2),
-    ("Wvolf/ViT-Deepfake-Detection",                   0.08, 2),
-    ("prithivMLmods/Deepfake-Detection-Exp-02-Model",  0.07, 3),
-    ("haywoodsloan/autotrain-deepfake-detection",       0.05, 3),
-    # CNN specialists — highest weights, run last
-    (_XCEPTION_ID,                                      0.33, 3),
-    (_EFFICIENTNET_ID,                                  0.25, 3),
+    # HuggingFace face-deepfake specialists (all verified to exist on HF Hub)
+    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.12, 1),  # FaceForensics++ trained
+    ("dima806/deepfake_vs_real_image_detection",        0.10, 2),  # 189K image dataset
+    ("Wvolf/ViT_Deepfake_Detection",                   0.10, 2),  # ViT deepfake specialist
+    ("prithivMLmods/deepfake-detector-model-v1",       0.08, 3),  # high-download v1 model
+    ("umm-maybe/AI-image-detector",                    0.05, 3),  # AI-generated image detector
+    # CNN specialists — highest weights, loaded last (require downloaded checkpoints)
+    (_XCEPTION_ID,                                      0.33, 3),  # FaceForensics++ 97% AUC
+    (_EFFICIENTNET_ID,                                  0.22, 3),  # DeepfakeBench top performer
 ]
 
 _FAKE = ("fake","deepfake","spoof","synthetic","artificial","generated",

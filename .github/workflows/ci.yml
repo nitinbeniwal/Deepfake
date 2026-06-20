@@ -64,7 +64,7 @@ jobs:
 
       - name: Verify new modules exist
         run: |
-          for f in metadata_analyzer forensic_rules pipeline api lipsync_analyzer temporal_analyzer spn_analyzer; do
+          for f in metadata_analyzer forensic_rules pipeline api lipsync_analyzer temporal_analyzer spn_analyzer frequency_analyzer; do
             [ -f "deepfake_detector/${f}.py" ] && echo "${f}.py OK" || { echo "MISSING: ${f}.py"; exit 1; }
           done
 
@@ -95,7 +95,8 @@ jobs:
           import types
           for stub in ["pipeline","audio_classifier","text_detector","crawler","processor",
                        "lipsync_analyzer","temporal_analyzer","spn_analyzer","forensic_rules",
-                       "metadata_analyzer","web_ui","model_downloader","gradcam_engine","classifier"]:
+                       "metadata_analyzer","web_ui","model_downloader","gradcam_engine","classifier",
+                       "frequency_analyzer"]:
               sys.modules[stub] = types.ModuleType(stub)
           spec.loader.exec_module(mod)
           routes = [r.path for r in mod.app.routes]
