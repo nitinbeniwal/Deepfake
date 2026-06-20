@@ -38,17 +38,46 @@ if not exist "venv\" (
 REM Activate venv
 call venv\Scripts\activate.bat
 
-REM Upgrade pip silently
+REM Upgrade pip
 python -m pip install --upgrade pip --quiet
 
-REM Install requirements
+REM ---- STEP 1: Pin numpy 2.x FIRST ----
+REM numpy 1.26.x has no prebuilt wheel for Python 3.13 and requires a C compiler.
+REM Pre-installing numpy 2.x prevents pip from backtracking to 1.26 when
+REM resolving other package dependencies (facenet-pytorch, grad-cam, etc.)
 echo.
-echo Installing requirements (this takes 3-5 minutes on first run)...
-echo (Downloading PyTorch, transformers, timm, facenet-pytorch...)
+echo Step 1/3: Installing numpy 2.x (Python 3.13 compatible wheel)...
+pip install "numpy>=2.0.0" --quiet
+if errorlevel 1 (
+    echo ERROR: numpy install failed.
+    pause
+    exit /b 1
+)
+echo numpy OK.
+
+REM ---- STEP 2: Install facenet-pytorch without strict numpy constraint ----
+echo.
+echo Step 2/3: Installing facenet-pytorch...
+pip install "facenet-pytorch>=2.5.3" --quiet
+if errorlevel 1 (
+    echo ERROR: facenet-pytorch install failed.
+    pause
+    exit /b 1
+)
+echo facenet-pytorch OK.
+
+REM ---- STEP 3: Install all remaining requirements ----
+echo.
+echo Step 3/3: Installing remaining requirements (PyTorch, transformers, timm...)
+echo This takes 3-8 minutes on first run (~2GB download).
 pip install -r requirements.txt
 if errorlevel 1 (
     echo.
-    echo ERROR: pip install failed. Check internet connection.
+    echo ERROR: pip install failed.
+    echo Common fixes:
+    echo   - Check internet connection
+    echo   - Run as Administrator
+    echo   - Try: pip install -r requirements.txt --no-build-isolation
     pause
     exit /b 1
 )
@@ -56,7 +85,8 @@ if errorlevel 1 (
 echo.
 echo ================================================
 echo  Setup complete!
-echo  Run:  run_local.bat   to start the server
-echo  Then open:  http://localhost:8000
+echo.
+echo  Run:      run_local.bat
+echo  Then open: http://localhost:8000
 echo ================================================
 pause

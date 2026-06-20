@@ -30,7 +30,7 @@ beautifulsoup4>=4.12.3
 
 # Data
 pandas>=2.2.0
-numpy>=1.26.0
+numpy>=2.0.0
 
 # Flask dashboard
 flask>=3.0.0
