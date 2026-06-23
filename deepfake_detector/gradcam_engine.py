@@ -87,13 +87,17 @@ def generate_gradcam(
     targets = [ClassifierOutputTarget(fake_class_idx)]
 
     model.eval()
+    try:
+        dev = next(model.parameters()).device
+    except StopIteration:
+        dev = "cpu"
 
     cam = GradCAM(model=model, target_layers=target_layers)
 
     for path in face_paths[:max_faces]:
         try:
             pil = Image.open(path).convert("RGB")
-            tensor = preprocess(pil).unsqueeze(0)
+            tensor = preprocess(pil).unsqueeze(0).to(dev)
 
             # Grad-CAM mask
             grayscale_cam = cam(input_tensor=tensor, targets=targets)

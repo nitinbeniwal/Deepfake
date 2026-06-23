@@ -15,8 +15,9 @@ def _get_pipe():
         with _lock:
             if _pipe is None:
                 from transformers import pipeline
+                from device_utils import hf_device
                 print(f"Loading audio model: {AUDIO_MODEL} ...")
-                _pipe = pipeline("audio-classification", model=AUDIO_MODEL)
+                _pipe = pipeline("audio-classification", model=AUDIO_MODEL, device=hf_device())
                 print("Audio model loaded")
     return _pipe
 

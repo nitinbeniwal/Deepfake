@@ -36,11 +36,12 @@ def meta_classify(component_scores: dict) -> dict:
     # NOTE: pipeline strips disabled signals (lipsync, spn — weight 0, inverted on
     # compressed video) before calling meta_classify, so rules depending on them
     # could never fire. Those rules were removed. Only live signals are read here.
-    visual   = cs.get("visual",   0) or 0
-    audio    = cs.get("audio",    0) or 0
-    metadata = cs.get("metadata", 0) or 0
-    temporal = cs.get("temporal", 0) or 0
-    forensic = cs.get("forensic", 0) or 0
+    visual    = cs.get("visual",    0) or 0
+    audio     = cs.get("audio",     0) or 0
+    metadata  = cs.get("metadata",  0) or 0
+    temporal  = cs.get("temporal",  0) or 0
+    forensic  = cs.get("forensic",  0) or 0
+    frequency = cs.get("frequency", 0) or 0
 
     boost = 0.0
     confidence_adj = 1.0
@@ -87,6 +88,15 @@ def meta_classify(component_scores: dict) -> dict:
         score_override = max(0, mean_s - 5)
         confidence_adj = 1.20
         reasons.append(f"high real consensus ({n_low} signals ≤25%)")
+
+    # Rule 7: Frequency / texture anomaly → mild boost (numpy spectral signal).
+    if frequency >= 60 and score_override is None:
+        boost += 10
+        confidence_adj = max(confidence_adj, 1.08)
+        reasons.append(f"frequency/texture anomaly ({frequency:.0f}%)")
+    elif frequency >= 40 and score_override is None:
+        boost += 5
+        reasons.append(f"mild texture anomaly ({frequency:.0f}%)")
 
     return {
         "score_override": score_override,

@@ -20,15 +20,17 @@ def _get_mtcnn():
     if _mtcnn is None:
         try:
             from facenet_pytorch import MTCNN
+            from device_utils import torch_device
+            dev = torch_device()
             _mtcnn = MTCNN(
                 keep_all   = True,
-                device     = "cpu",
+                device     = dev,
                 min_face_size = 20,
                 thresholds = [0.6, 0.7, 0.7],
                 post_process = False,
             )
             _mtcnn_ok = True
-            print("Face detector: MTCNN ready")
+            print(f"Face detector: MTCNN ready ({dev})")
         except Exception as e:
             print(f"Face detector: MTCNN unavailable ({e}) — using Haar cascade")
             _mtcnn_ok = False

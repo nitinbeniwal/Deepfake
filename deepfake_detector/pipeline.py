@@ -41,13 +41,14 @@ _KEEP_WARM = (not _LOW_MEM) and os.environ.get("KEEP_MODELS_WARM", "1") != "0"
 # i.e. they fire on the genuine clip. They still run for display but do not affect
 # the score. Temporal is the only heuristic that separated correctly, kept small.
 W = {
-    "visual":   0.58,
-    "audio":    0.17,
-    "temporal": 0.12,
-    "lipsync":  0.00,   # disabled — inverted on compressed video
-    "spn":      0.00,   # disabled — inverted on compressed video
-    "forensic": 0.08,
-    "metadata": 0.05,
+    "visual":    0.55,
+    "audio":     0.17,
+    "temporal":  0.12,
+    "lipsync":   0.00,   # disabled — inverted on compressed video
+    "spn":       0.00,   # disabled — inverted on compressed video
+    "frequency": 0.05,   # texture + spectral analysis (numpy, no ML)
+    "forensic":  0.08,
+    "metadata":  0.05,
 }
 
 # ── Focus modes ───────────────────────────────────────────────────────────────
@@ -61,8 +62,8 @@ W = {
 #   audio   voice clone — audio model only, skip all frame/face work
 #   quick   fast triage — visual models only, skip slow heuristics
 FOCUS_STEPS = {
-    "full":   {"visual", "audio", "temporal", "lipsync", "spn", "forensic"},
-    "visual": {"visual", "temporal", "spn", "forensic"},
+    "full":   {"visual", "audio", "temporal", "lipsync", "spn", "frequency", "forensic"},
+    "visual": {"visual", "temporal", "spn", "frequency", "forensic"},
     "audio":  {"audio"},
     "quick":  {"visual"},
 }
@@ -168,7 +169,7 @@ def analyze_video(video_path, cleanup=True, on_stage=None, focus="full"):
     except Exception:
         pass
     steps_on = FOCUS_STEPS[focus]
-    need_faces = bool(steps_on & {"visual", "temporal", "lipsync", "spn", "forensic"})
+    need_faces = bool(steps_on & {"visual", "temporal", "lipsync", "spn", "frequency", "forensic"})
 
     def step(name, partial=None):
         if on_stage:
@@ -347,6 +348,19 @@ def analyze_video(video_path, cleanup=True, on_stage=None, focus="full"):
                 components["spn_error"] = str(e)
             components["spn"] = {"score": cs["spn"]}
             step("spn_done", dict(cs))
+            gc.collect()
+
+        # ── Step 6b: Frequency / texture analysis (numpy + cv2, no ML) ────
+        if "frequency" in steps_on:
+            step("frequency")
+            try:
+                from frequency_analyzer import frequency_score
+                cs["frequency"] = frequency_score(face_paths)
+            except Exception as e:
+                cs["frequency"] = None
+                components["frequency_error"] = str(e)
+            components["frequency"] = {"score": cs["frequency"]}
+            step("frequency_done", dict(cs))
             gc.collect()
 
         # ── Step 7: Forensic rules (numpy + PIL, no ML) ───────────────────

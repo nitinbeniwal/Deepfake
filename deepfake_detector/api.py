@@ -114,6 +114,11 @@ _executor = ThreadPoolExecutor(max_workers=2)
 def _preload_models():
     """Warm up primary model on startup so first analysis doesn't cold-start."""
     try:
+        from device_utils import describe
+        print(f"Compute device: {describe()}")
+    except Exception:
+        pass
+    try:
         from classifier import _get_pipe
         _get_pipe("prithivMLmods/Deep-Fake-Detector-v2-Model")
         print("Primary model preloaded OK")

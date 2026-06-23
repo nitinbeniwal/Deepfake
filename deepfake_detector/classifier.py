@@ -134,7 +134,9 @@ class _XceptionWrapper:
                 f"matched={len(sd) - len(unexpected)}/{len(sd)}) — refusing to run with random head")
         print(f"Xception: FF++ weights loaded ({len(sd) - len(unexpected)}/{len(sd)} keys, head OK)")
 
-        self.model.eval()
+        from device_utils import torch_device
+        self.device = torch_device()
+        self.model.eval().to(self.device)
         self.transform = transforms.Compose([
             transforms.Resize((299, 299)),
             transforms.ToTensor(),
@@ -146,9 +148,9 @@ class _XceptionWrapper:
         results = []
         for i in range(0, len(images), batch_size):
             batch   = images[i : i + batch_size]
-            tensors = torch.stack([self.transform(img) for img in batch])
+            tensors = torch.stack([self.transform(img) for img in batch]).to(self.device)
             with torch.no_grad():
-                probs = torch.softmax(self.model(tensors), dim=1)
+                probs = torch.softmax(self.model(tensors), dim=1).cpu()
             for p in probs:
                 results.append([
                     {"label": "FAKE", "score": float(p[1])},
@@ -234,8 +236,10 @@ class _EfficientNetWrapper:
         self.head.load_state_dict({"weight": hw, "bias": hb})
         print(f"EfficientNet-B4: FF++ weights loaded ({len(sd) - len(unexpected)}/{len(sd)} keys, head OK)")
 
-        self.net.eval()
-        self.head.eval()
+        from device_utils import torch_device
+        self.device = torch_device()
+        self.net.eval().to(self.device)
+        self.head.eval().to(self.device)
         self.transform = transforms.Compose([
             transforms.Resize((380, 380)),
             transforms.ToTensor(),
@@ -248,11 +252,11 @@ class _EfficientNetWrapper:
         results = []
         for i in range(0, len(images), batch_size):
             batch   = images[i : i + batch_size]
-            tensors = torch.stack([self.transform(img) for img in batch])
+            tensors = torch.stack([self.transform(img) for img in batch]).to(self.device)
             with torch.no_grad():
                 feat  = self.net.extract_features(tensors)
                 feat  = F.adaptive_avg_pool2d(feat, 1).flatten(1)
-                probs = torch.softmax(self.head(feat), dim=1)
+                probs = torch.softmax(self.head(feat), dim=1).cpu()
             for p in probs:
                 results.append([
                     {"label": "FAKE", "score": float(p[1])},
@@ -299,10 +303,12 @@ def _get_pipe(model_id):
         with _lock:
             if model_id not in _pipes:
                 from transformers import pipeline
+                from device_utils import hf_device
                 short = model_id.split("/")[-1]
                 print(f"Loading: {short} ...")
                 try:
-                    _pipes[model_id] = pipeline("image-classification", model=model_id)
+                    _pipes[model_id] = pipeline("image-classification", model=model_id,
+                                                device=hf_device())
                     print(f"Loaded:  {short} OK")
                 except Exception as e:
                     print(f"SKIP:    {short} — {e}")
