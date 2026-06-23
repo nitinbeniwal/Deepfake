@@ -112,16 +112,30 @@ _executor = ThreadPoolExecutor(max_workers=2)
 
 
 def _preload_models():
-    """Warm up primary model on startup so first analysis doesn't cold-start."""
+    """
+    Warm ALL visual models on startup so analyses don't pay cold-start cost.
+    With models kept warm (not LOW_MEM) only this one-time load is slow; every
+    upload after is fast. In LOW_MEM we warm only the primary to bound RAM.
+    """
     try:
         from device_utils import describe
         print(f"Compute device: {describe()}")
     except Exception:
         pass
+    low_mem = os.environ.get("LOW_MEM", "0") == "1"
     try:
-        from classifier import _get_pipe
-        _get_pipe("prithivMLmods/Deep-Fake-Detector-v2-Model")
-        print("Primary model preloaded OK")
+        from classifier import _get_pipe, _MODELS
+        if low_mem:
+            _get_pipe(_MODELS[0][0])
+            print("Primary model preloaded OK")
+        else:
+            for i, (mid, _w, _s) in enumerate(_MODELS, 1):
+                try:
+                    _get_pipe(mid)        # cached + kept warm for fast uploads
+                    print(f"Preloaded model {i}/{len(_MODELS)}")
+                except Exception as e:
+                    print(f"Preload model {i} skipped: {e}")
+            print("All visual models preloaded OK")
     except Exception as e:
         print(f"Preload skipped: {e}")
 
@@ -817,8 +831,15 @@ async def admin_stats():
     if os.path.exists(_EVENT_LOG):
         event_log_size = os.path.getsize(_EVENT_LOG)
 
+    try:
+        from device_utils import describe as _dev_describe
+        device = _dev_describe()
+    except Exception:
+        device = "CPU"
+
     return JSONResponse({
         "server_start":   _SERVER_START,
+        "device":         device,
         "uptime":         f"{hours}h {mins}m {secs}s",
         "uptime_seconds": uptime_s,
         "jobs":           counts,

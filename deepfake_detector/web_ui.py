@@ -634,9 +634,44 @@ hr.section-div { border: none; border-top: 1px solid var(--border); margin: 14px
 ::-webkit-scrollbar-track { background: var(--surface2); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+  /* disclaimer modal */
+  #dfDisclaimer { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:9999;
+    display:none; align-items:center; justify-content:center; }
+  #dfDisclaimer.show { display:flex; }
+  #dfDisclaimer .dlg { background:var(--card,#fff); color:var(--text,#111); max-width:440px;
+    width:90%; border-radius:14px; padding:24px 26px; box-shadow:0 20px 60px rgba(0,0,0,.4);
+    border:1px solid var(--border,#e5e7eb); }
+  #dfDisclaimer h3 { margin:0 0 10px; font-size:17px; }
+  #dfDisclaimer p { margin:0 0 12px; font-size:13px; line-height:1.5; color:var(--text2,#555); }
+  #dfDisclaimer .gpu { font-weight:600; color:var(--text,#111); }
+  #dfDisclaimer button { margin-top:6px; width:100%; padding:11px; border:none; border-radius:9px;
+    background:var(--nav-bg,#111); color:#fff; font-weight:600; font-size:14px; cursor:pointer; }
 </style>
 </head>
 <body>
+
+<!-- Analysis time disclaimer -->
+<div id="dfDisclaimer">
+  <div class="dlg">
+    <h3>⏳ Analysis may take a while</h3>
+    <p>This tool runs several detection models on each upload. On a CPU-only
+       machine a single video can take <strong>one to two minutes or more</strong>
+       to produce a fake score and verdict.</p>
+    <p class="gpu">For faster analysis, run it on a machine with a dedicated GPU —
+       the models use the GPU automatically when one is available.</p>
+    <p id="dfDevLine" style="font-size:12px;opacity:.8"></p>
+    <button onclick="document.getElementById('dfDisclaimer').classList.remove('show')">Got it</button>
+  </div>
+</div>
+<script>
+  (function(){
+    try { document.getElementById('dfDisclaimer').classList.add('show'); } catch(e){}
+    // show the active compute device if the API exposes it
+    fetch('/admin/stats').then(r=>r.json()).then(d=>{
+      var el=document.getElementById('dfDevLine'); if(el && d && d.device) el.textContent='Current device: '+d.device;
+    }).catch(function(){});
+  })();
+</script>
 
 <!-- Top nav -->
 <nav class="topnav">
@@ -1063,7 +1098,7 @@ function applyStage(stage) {
   } else {
     if (el && !_kpDone[kp]) { el.className = 'kp-step active'; el.querySelector('.kp-dot').innerHTML = '<div class="kp-spin"></div>'; }
     let lbl = KP_LABEL[kp];
-    if (stage.startsWith('visual:')) { const m = stage.split(':')[1]; document.getElementById('kpsub-visual').textContent = m; lbl = 'Running model: '+m; }
+    if (stage.startsWith('visual:')) { const m = stage.split(':')[1]; document.getElementById('kpsub-visual').textContent = m; lbl = 'Running '+m; }
     document.getElementById('progStage').textContent = lbl;
     setProgress(((idx+0.5)/_kpList.length)*100, null, 'Elapsed ~'+_elapsed+'s · analyzing');
   }
@@ -1549,7 +1584,7 @@ function evApplyStage(stage) {
   } else {
     if (el&&!_evDone[kp]) { el.className='kp-step active'; el.querySelector('.kp-dot').innerHTML='<div class="kp-spin"></div>'; }
     let lbl=KP_LABEL[kp];
-    if (stage.startsWith('visual:')) { const m=stage.split(':')[1]; document.getElementById('evkpsub-visual').textContent=m; lbl='Model: '+m; }
+    if (stage.startsWith('visual:')) { const m=stage.split(':')[1]; document.getElementById('evkpsub-visual').textContent=m; lbl='Running '+m; }
     document.getElementById('evStage').textContent=lbl;
     _evTarget=((idx+0.5)/_evKp.length)*100; evCreepStart();
   }

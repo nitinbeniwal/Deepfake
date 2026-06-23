@@ -245,10 +245,9 @@ def analyze_video(video_path, cleanup=True, on_stage=None, focus="full"):
 
                 model_accum = {}  # model_id → (agg_score, weight)
 
-                for model_id, weight, _stage in _MODELS:
-                    # Build short label for live stage reporting
-                    short = model_id.split("/")[-1] if "/" in model_id else model_id.split(":")[-1]
-                    step(f"visual:{short}", dict(cs))
+                # Model identities are not exposed to the UI — only "Model N".
+                for _i, (model_id, weight, _stage) in enumerate(_MODELS, 1):
+                    step(f"visual:Model {_i}", dict(cs))
                     try:
                         from PIL import Image
                         pils = []
@@ -268,8 +267,7 @@ def analyze_video(video_path, cleanup=True, on_stage=None, focus="full"):
                                     model_accum[model_id] = (_agg_frames(valid), weight)
                         del pils
                     except Exception as ex:
-                        short = model_id.split("/")[-1] if "/" in model_id else model_id
-                        print(f"Visual model {short} error: {ex}")
+                        print(f"Visual Model {_i} error: {ex}")
                     finally:
                         _unload_hf(model_id)
 
@@ -520,10 +518,8 @@ def analyze_image(path, cleanup=True, on_stage=None):
             try:
                 from classifier import _MODELS, _get_pipe, _score as _cls_score, _calibrate
                 model_accum = {}
-                for model_id, weight, _s in _MODELS:
-                    short = (model_id.split("/")[-1] if "/" in model_id
-                             else model_id.split(":")[-1])
-                    step(f"visual:{short}", dict(cs))
+                for _i, (model_id, weight, _s) in enumerate(_MODELS, 1):
+                    step(f"visual:Model {_i}", dict(cs))
                     try:
                         pils = []
                         for p in face_paths:
@@ -539,7 +535,7 @@ def analyze_image(path, cleanup=True, on_stage=None):
                                     model_accum[model_id] = (_agg_frames(valid), weight)
                         del pils
                     except Exception as ex:
-                        print(f"Visual model {short} error: {ex}")
+                        print(f"Visual Model {_i} error: {ex}")
                     finally:
                         _unload_hf(model_id)
                 if model_accum:
