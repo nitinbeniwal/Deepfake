@@ -1,0 +1,17 @@
+{
+  "id": "nishubeniwal/deepfake-xception-finetune",
+  "title": "Deepfake Xception Finetune",
+  "code_file": "train_colab_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "gradientvoyager/faceforensics-c23-extracted-faces-100k",
+    "manjilkarki/deepfake-and-real-images"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

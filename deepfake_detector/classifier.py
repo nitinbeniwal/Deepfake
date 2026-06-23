@@ -27,7 +27,19 @@ Stage cascade (normal mode only, not LOW_MEM):
 import gc, os, threading, statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-CALIBRATION_OFFSET = 0
+import calibration as _calib
+
+# Subtracted from every visual model score. Learned from operator feedback and
+# stored in calibration.json — refresh_calibration() reloads it at the start of
+# each analysis so corrections take effect on the next upload (no restart).
+CALIBRATION_OFFSET = _calib.get_visual_offset()
+
+
+def refresh_calibration():
+    global CALIBRATION_OFFSET
+    CALIBRATION_OFFSET = _calib.get_visual_offset()
+
+
 _LOW_MEM = os.environ.get("LOW_MEM", "0") == "1"
 
 UNCERTAIN_LO, UNCERTAIN_HI   = 20, 80
@@ -39,12 +51,12 @@ _EFFICIENTNET_ID = "timm:efficientnet_b4_deepfake"
 
 _MODELS = [
     # (model_id, weight, stage)   — weights sum to 1.0
-    # HuggingFace ViT models
+    # HuggingFace ViT models (IDs verified live on HF Hub 2026-06)
     ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.12, 1),
     ("dima806/deepfake_vs_real_image_detection",        0.10, 2),
-    ("Wvolf/ViT-Deepfake-Detection",                   0.08, 2),
-    ("prithivMLmods/Deepfake-Detection-Exp-02-Model",  0.07, 3),
-    ("haywoodsloan/autotrain-deepfake-detection",       0.05, 3),
+    ("Wvolf/ViT_Deepfake_Detection",                   0.08, 2),   # was hyphen ID (404)
+    ("prithivMLmods/Deep-Fake-Detector-Model",         0.07, 3),   # was Exp-02 (404)
+    ("Organika/sdxl-detector",                          0.05, 3),  # AI-generation detector (Gemini/Sora-type)
     # CNN specialists — highest weights, run last
     (_XCEPTION_ID,                                      0.33, 3),
     (_EFFICIENTNET_ID,                                  0.25, 3),
@@ -70,29 +82,57 @@ _XCEPTION_CKPT     = os.path.join(os.path.dirname(__file__), "xception_deepfake.
 
 class _XceptionWrapper:
     """
-    Xception CNN via timm. Mimics HF pipeline __call__ interface.
-    Designed for FaceForensics++ deepfake detection (299×299 input).
+    Xception CNN via timm, loaded with DeepfakeBench FF++ weights.
+    Mimics HF pipeline __call__ interface. 299×299 input.
 
-    Checkpoint: auto-downloaded from DeepfakeBench GitHub releases at startup
-    (xception_best.pth, trained on FF++, 97%+ AUC on within-dataset eval).
-    Smart key remapping handles DeepfakeBench's backbone. wrapper structure.
+    DeepfakeBench checkpoint (xception_best.pth) layout:
+      backbone.*          → timm legacy_xception backbone   (matches after prefix strip)
+      backbone.last_linear → classifier head Linear(2048, 2) (timm calls it 'fc')
+      backbone.adjust_channel → unused feature-adapter, dropped
+
+    IMPORTANT: if the classifier head fails to load we RAISE, so the caller
+    skips this model entirely instead of injecting a random-head (noise) score.
+    Label convention: softmax index 1 = FAKE, index 0 = REAL (DeepfakeBench).
     """
 
     def __init__(self):
-        import timm
+        import timm, torch
         from torchvision import transforms
-        print("Loading: xception (timm) ...")
-        self.model = timm.create_model("xception", pretrained=True, num_classes=2)
+        print("Loading: xception (DeepfakeBench FF++) ...")
+        self.model = timm.create_model("xception", pretrained=False, num_classes=2)
 
-        if os.path.exists(_XCEPTION_CKPT):
-            from model_downloader import try_load_checkpoint
-            matched = try_load_checkpoint(self.model, _XCEPTION_CKPT)
-            if matched > 0:
-                print(f"Xception: DeepfakeBench checkpoint loaded ({matched} params matched)")
-            else:
-                print("Xception: checkpoint present but no keys matched — using ImageNet backbone")
+        if not os.path.exists(_XCEPTION_CKPT):
+            raise FileNotFoundError("xception_deepfake.pt not present")
+
+        raw = torch.load(_XCEPTION_CKPT, map_location="cpu", weights_only=False)
+        if isinstance(raw, dict) and "state_dict" in raw and isinstance(raw["state_dict"], dict):
+            raw = raw["state_dict"]
+
+        # Two accepted formats:
+        #  (a) DeepfakeBench: keys prefixed 'backbone.', head named 'last_linear'
+        #  (b) Native timm fine-tune (our train_finetune.py output): plain timm keys
+        if any(k.startswith("backbone.") for k in raw):
+            sd = {}
+            for k, v in raw.items():
+                if not k.startswith("backbone."):
+                    continue
+                kk = k[len("backbone."):]
+                if kk.startswith("adjust_channel"):    # DeepfakeBench adapter — unused at inference
+                    continue
+                if kk.startswith("last_linear"):        # head → timm 'fc'
+                    kk = "fc" + kk[len("last_linear"):]
+                sd[kk] = v
         else:
-            print("Xception: checkpoint not yet downloaded — using ImageNet pretrained")
+            sd = dict(raw)                              # native timm state_dict
+
+        missing, unexpected = self.model.load_state_dict(sd, strict=False)
+        head_ok = "fc.weight" not in missing and "fc.bias" not in missing
+        backbone_ok = len(sd) - len(unexpected) > 100
+        if not (head_ok and backbone_ok):
+            raise RuntimeError(
+                f"Xception checkpoint incomplete (head_ok={head_ok}, "
+                f"matched={len(sd) - len(unexpected)}/{len(sd)}) — refusing to run with random head")
+        print(f"Xception: FF++ weights loaded ({len(sd) - len(unexpected)}/{len(sd)} keys, head OK)")
 
         self.model.eval()
         self.transform = transforms.Compose([
@@ -152,31 +192,50 @@ _EFFICIENTNET_CKPT     = os.path.join(os.path.dirname(__file__), "efficientnet_b
 
 class _EfficientNetWrapper:
     """
-    EfficientNet-B4 CNN via timm. Mimics HF pipeline __call__ interface.
-    DeepfakeBench top performer on FF++ (97% AUC). 380×380 input.
+    EfficientNet-B4 with DeepfakeBench FF++ weights, via the lukemelas
+    `efficientnet_pytorch` lib (the arch DeepfakeBench actually trained on).
+    Mimics HF pipeline __call__ interface. 380×380 input.
 
-    Checkpoint: auto-downloaded from DeepfakeBench GitHub releases at startup
-    (effnb4_best.pth, trained on FF++).
-    Smart key remapping handles any wrapper prefix differences.
+    DeepfakeBench checkpoint (effnb4_best.pth) layout:
+      backbone.efficientnet.*  → EfficientNet feature extractor (no _fc)
+      backbone.last_layer      → classifier head Linear(1792, 2)
+
+    Uses extract_features → global avg pool → last_layer. RAISES if the head
+    cannot be built, so the caller skips it rather than scoring with noise.
+    Label convention: softmax index 1 = FAKE, index 0 = REAL.
     """
 
     def __init__(self):
-        import timm
+        import torch
+        import torch.nn as nn
+        from efficientnet_pytorch import EfficientNet
         from torchvision import transforms
-        print("Loading: efficientnet_b4 (timm) ...")
-        self.model = timm.create_model("efficientnet_b4", pretrained=True, num_classes=2)
+        print("Loading: efficientnet_b4 (DeepfakeBench FF++) ...")
 
-        if os.path.exists(_EFFICIENTNET_CKPT):
-            from model_downloader import try_load_checkpoint
-            matched = try_load_checkpoint(self.model, _EFFICIENTNET_CKPT)
-            if matched > 0:
-                print(f"EfficientNet-B4: DeepfakeBench checkpoint loaded ({matched} params matched)")
-            else:
-                print("EfficientNet-B4: checkpoint present but no keys matched — using ImageNet backbone")
-        else:
-            print("EfficientNet-B4: checkpoint not yet downloaded — using ImageNet pretrained")
+        if not os.path.exists(_EFFICIENTNET_CKPT):
+            raise FileNotFoundError("efficientnet_b4_deepfake.pt not present")
 
-        self.model.eval()
+        self.net = EfficientNet.from_name("efficientnet-b4")
+        raw = torch.load(_EFFICIENTNET_CKPT, map_location="cpu", weights_only=False)
+        if isinstance(raw, dict) and "state_dict" in raw and isinstance(raw["state_dict"], dict):
+            raw = raw["state_dict"]
+
+        pref = "backbone.efficientnet."
+        sd = {k[len(pref):]: v for k, v in raw.items() if k.startswith(pref)}
+        missing, unexpected = self.net.load_state_dict(sd, strict=False)
+        backbone_ok = len(sd) - len(unexpected) > 300
+        if not backbone_ok:
+            raise RuntimeError(f"EffB4 backbone load failed ({len(sd) - len(unexpected)}/{len(sd)})")
+
+        hw, hb = raw.get("backbone.last_layer.weight"), raw.get("backbone.last_layer.bias")
+        if hw is None or hb is None:
+            raise RuntimeError("EffB4 classifier head (last_layer) missing — refusing random head")
+        self.head = nn.Linear(hw.shape[1], hw.shape[0])
+        self.head.load_state_dict({"weight": hw, "bias": hb})
+        print(f"EfficientNet-B4: FF++ weights loaded ({len(sd) - len(unexpected)}/{len(sd)} keys, head OK)")
+
+        self.net.eval()
+        self.head.eval()
         self.transform = transforms.Compose([
             transforms.Resize((380, 380)),
             transforms.ToTensor(),
@@ -185,12 +244,15 @@ class _EfficientNetWrapper:
 
     def __call__(self, images, batch_size=4):
         import torch
+        import torch.nn.functional as F
         results = []
         for i in range(0, len(images), batch_size):
             batch   = images[i : i + batch_size]
             tensors = torch.stack([self.transform(img) for img in batch])
             with torch.no_grad():
-                probs = torch.softmax(self.model(tensors), dim=1)
+                feat  = self.net.extract_features(tensors)
+                feat  = F.adaptive_avg_pool2d(feat, 1).flatten(1)
+                probs = torch.softmax(self.head(feat), dim=1)
             for p in probs:
                 results.append([
                     {"label": "FAKE", "score": float(p[1])},

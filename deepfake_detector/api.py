@@ -19,10 +19,21 @@ Run:
 """
 
 import os
+import sys
 import json
 import uuid
 import tempfile
 import threading
+
+# Windows consoles default to cp1252 — any non-ASCII in a print() (e.g. arrows,
+# emoji) raises UnicodeEncodeError mid-analysis, which the pipeline catches as an
+# extraction error and silently drops the visual signal. Force UTF-8 with
+# replacement so logging can never abort detection.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -48,10 +59,50 @@ app.add_middleware(
 )
 
 RESULTS_DIR = "results"
+LOGS_DIR    = "logs"
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+_ERROR_LOG  = os.path.join(LOGS_DIR, "errors.jsonl")
+_EVENT_LOG  = os.path.join(LOGS_DIR, "events.jsonl")
+_SERVER_START = datetime.now().isoformat()
+
+def _log_event(event: str, data: dict):
+    """Append a structured event to the event log (non-blocking)."""
+    try:
+        row = {"ts": datetime.now().isoformat(), "event": event, **data}
+        with open(_EVENT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+def _log_error(job_id: str, filename: str, stage: str, error: str, tb: str = ""):
+    """Append a structured error record."""
+    try:
+        row = {
+            "ts": datetime.now().isoformat(),
+            "job_id": job_id,
+            "filename": filename,
+            "stage": stage,
+            "error": error,
+            "traceback": tb,
+        }
+        with open(_ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
 
 _VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
-_AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+_AUDIO_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".wma", ".opus", ".amr"}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif", ".gif"}
+_ALL_EXTS   = _VIDEO_EXTS | _AUDIO_EXTS | _IMAGE_EXTS
+
+def _media_type(ext: str) -> str:
+    e = ext.lower()
+    if e in _VIDEO_EXTS: return "video"
+    if e in _AUDIO_EXTS: return "audio"
+    if e in _IMAGE_EXTS: return "image"
+    return "unknown"
 
 # ── async job store ──────────────────────────────────────────────────────────
 # jobs: {job_id: {"status": "pending"|"running"|"done"|"error", "result": ...}}
@@ -92,9 +143,119 @@ def _tmp(suffix):
     return path
 
 
-def _run_video_job(job_id: str, path: str, filename: str):
+def _finish_job(job_id, path, result, case_id, evidence_id):
+    """Common completion handler for all media job types."""
+    _log(result)
+    filename = result.get("filename", "")
+    _log_event("job_done", {"job_id": job_id, "filename": filename,
+                            "verdict": result.get("verdict"), "score": result.get("final_score")})
+    with _jobs_lock:
+        _jobs[job_id].update({"status": "done", "result": result, "stage": "done",
+                               "finished": datetime.now().isoformat()})
+    if case_id and evidence_id:
+        try:
+            from case_store import set_evidence
+            set_evidence(case_id, evidence_id, status="done", result=result)
+        except Exception:
+            pass
+    if os.path.exists(path):
+        try: os.remove(path)
+        except OSError: pass
+
+
+def _fail_job(job_id, path, error, case_id, evidence_id, stage="unknown", tb=""):
+    import traceback as _tb
+    tb_str = tb or _tb.format_exc()
+    with _jobs_lock:
+        info = _jobs.get(job_id, {})
+        filename = info.get("filename", "")
+        _jobs[job_id].update({"status": "error", "error": str(error),
+                               "stage": stage, "traceback": tb_str,
+                               "finished": datetime.now().isoformat()})
+    _log_error(job_id, filename, stage, str(error), tb_str)
+    _log_event("job_error", {"job_id": job_id, "filename": filename,
+                              "stage": stage, "error": str(error)})
+    if case_id and evidence_id:
+        try:
+            from case_store import set_evidence
+            set_evidence(case_id, evidence_id, status="error",
+                         result={"error": str(error), "stage": stage})
+        except Exception:
+            pass
+    if os.path.exists(path):
+        try: os.remove(path)
+        except OSError: pass
+
+
+def _run_image_job(job_id: str, path: str, filename: str,
+                   case_id: str = None, evidence_id: str = None):
     with _jobs_lock:
         _jobs[job_id].update({"status": "running", "stage": "starting", "partial_scores": {}})
+    if case_id and evidence_id:
+        try:
+            from case_store import set_evidence
+            set_evidence(case_id, evidence_id, status="running", job_id=job_id)
+        except Exception:
+            pass
+
+    def on_stage(stage: str, partial: dict):
+        with _jobs_lock:
+            _jobs[job_id]["stage"]          = stage
+            _jobs[job_id]["partial_scores"] = partial
+
+    try:
+        from pipeline import analyze_image as _ai
+        result = _ai(path, cleanup=True, on_stage=on_stage)
+        result["filename"] = filename
+        result["job_id"]   = job_id
+        _finish_job(job_id, path, result, case_id, evidence_id)
+    except Exception as e:
+        import traceback as _tb
+        with _jobs_lock:
+            stage = _jobs.get(job_id, {}).get("stage", "unknown")
+        _fail_job(job_id, path, e, case_id, evidence_id, stage=stage, tb=_tb.format_exc())
+
+
+def _run_audio_job(job_id: str, path: str, filename: str,
+                   case_id: str = None, evidence_id: str = None):
+    with _jobs_lock:
+        _jobs[job_id].update({"status": "running", "stage": "starting", "partial_scores": {}})
+    if case_id and evidence_id:
+        try:
+            from case_store import set_evidence
+            set_evidence(case_id, evidence_id, status="running", job_id=job_id)
+        except Exception:
+            pass
+
+    def on_stage(stage: str, partial: dict):
+        with _jobs_lock:
+            _jobs[job_id]["stage"]          = stage
+            _jobs[job_id]["partial_scores"] = partial
+
+    try:
+        from pipeline import analyze_audio as _aa
+        result = _aa(path, cleanup=True, on_stage=on_stage)
+        result["filename"] = filename
+        result["job_id"]   = job_id
+        _finish_job(job_id, path, result, case_id, evidence_id)
+    except Exception as e:
+        import traceback as _tb
+        with _jobs_lock:
+            stage = _jobs.get(job_id, {}).get("stage", "unknown")
+        _fail_job(job_id, path, e, case_id, evidence_id, stage=stage, tb=_tb.format_exc())
+
+
+def _run_video_job(job_id: str, path: str, filename: str,
+                   case_id: str = None, evidence_id: str = None, focus: str = "full"):
+    with _jobs_lock:
+        _jobs[job_id].update({"status": "running", "stage": "starting", "partial_scores": {}})
+
+    if case_id and evidence_id:
+        try:
+            from case_store import set_evidence
+            set_evidence(case_id, evidence_id, status="running", job_id=job_id)
+        except Exception:
+            pass
 
     def on_stage(stage: str, partial: dict):
         with _jobs_lock:
@@ -103,19 +264,15 @@ def _run_video_job(job_id: str, path: str, filename: str):
 
     try:
         from pipeline import analyze_video as _av
-        result = _av(path, cleanup=True, on_stage=on_stage)
+        result = _av(path, cleanup=True, on_stage=on_stage, focus=focus)
         result["filename"] = filename
         result["job_id"]   = job_id
-        _log(result)
-        with _jobs_lock:
-            _jobs[job_id].update({"status": "done", "result": result, "stage": "done"})
+        _finish_job(job_id, path, result, case_id, evidence_id)
     except Exception as e:
+        import traceback as _tb
         with _jobs_lock:
-            _jobs[job_id].update({"status": "error", "error": str(e), "stage": "error"})
-    finally:
-        if os.path.exists(path):
-            try: os.remove(path)
-            except OSError: pass
+            stage = _jobs.get(job_id, {}).get("stage", "unknown")
+        _fail_job(job_id, path, e, case_id, evidence_id, stage=stage, tb=_tb.format_exc())
 
 
 # ─── dashboard ───────────────────────────────────────────────────────────────
@@ -138,11 +295,17 @@ async def health():
 # ─── video (async) ───────────────────────────────────────────────────────────
 
 @app.post("/analyze/video", status_code=202)
-async def analyze_video(file: UploadFile = File(...)):
-    """Submit video for async analysis. Returns job_id — poll GET /jobs/{job_id}."""
+async def analyze_video(file: UploadFile = File(...), focus: str = Query("full")):
+    """Submit any media file for async analysis. Returns job_id — poll GET /jobs/{job_id}.
+
+    Accepts: video (mp4/avi/mov/mkv/webm/m4v), image (jpg/png/webp/bmp/gif/heic),
+             audio (mp3/wav/m4a/flac/ogg/aac/opus).
+    focus: full | visual | audio | quick — applies to video only."""
     ext = Path(file.filename or "").suffix.lower()
-    if ext not in _VIDEO_EXTS:
-        raise HTTPException(400, f"Unsupported video type '{ext}'")
+    if ext not in _ALL_EXTS:
+        raise HTTPException(400, f"Unsupported file type '{ext}'. "
+                            f"Supported: video={sorted(_VIDEO_EXTS)}, "
+                            f"image={sorted(_IMAGE_EXTS)}, audio={sorted(_AUDIO_EXTS)}")
 
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
@@ -156,11 +319,18 @@ async def analyze_video(file: UploadFile = File(...)):
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {"status": "pending", "result": None,
-                         "filename": file.filename,
+                         "filename": file.filename, "focus": focus,
                          "submitted": datetime.now().isoformat()}
 
-    _executor.submit(_run_video_job, job_id, path, file.filename or "upload")
-    return JSONResponse({"job_id": job_id, "status": "pending",
+    mtype = _media_type(ext)
+    if mtype == "image":
+        _executor.submit(_run_image_job, job_id, path, file.filename or "upload", None, None)
+    elif mtype == "audio":
+        _executor.submit(_run_audio_job, job_id, path, file.filename or "upload", None, None)
+    else:
+        _executor.submit(_run_video_job, job_id, path, file.filename or "upload", None, None, focus)
+
+    return JSONResponse({"job_id": job_id, "status": "pending", "media_type": mtype,
                          "poll_url": f"/jobs/{job_id}"}, status_code=202)
 
 
@@ -219,7 +389,8 @@ async def analyze_audio(file: UploadFile = File(...)):
             f.write(await file.read())
         from audio_classifier import classify_audio
         score = classify_audio(path)
-        verdict = "FAKE" if score >= 50 else ("UNCERTAIN" if score >= 35 else "REAL")
+        from calibration import verdict as _verdict
+        verdict = _verdict(score)
         result = {"score": score, "verdict": verdict,
                   "filename": file.filename,
                   "timestamp": datetime.now().isoformat()}
@@ -333,9 +504,31 @@ async def submit_feedback(req: FeedbackReq):
         "notes": req.notes,
         "timestamp": datetime.now().isoformat(),
     }
-    with open(os.path.join(RESULTS_DIR, "feedback.jsonl"), "a") as f:
+    fpath = os.path.join(RESULTS_DIR, "feedback.jsonl")
+    with open(fpath, "a") as f:
         f.write(json.dumps(entry) + "\n")
-    return JSONResponse({"status": "ok", "id": entry["id"]})
+
+    # Feed the correction back into calibration so the next upload scores better.
+    # Re-reads ALL feedback and recomputes the visual offset (EMA + clamped).
+    calib = None
+    try:
+        rows = []
+        with open(fpath, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try: rows.append(json.loads(line))
+                    except json.JSONDecodeError: pass
+        from calibration import record_feedback
+        calib = record_feedback(rows)
+        _log_event("calibration_update",
+                   {"visual_offset": calib.get("visual_offset"),
+                    "n_feedback": calib.get("n_feedback")})
+    except Exception as e:
+        _log_event("calibration_error", {"error": str(e)})
+
+    return JSONResponse({"status": "ok", "id": entry["id"],
+                         "calibration": calib})
 
 
 @app.post("/analyze/gradcam")
@@ -399,11 +592,237 @@ async def feedback_stats():
                 try: entries.append(json.loads(line))
                 except json.JSONDecodeError: pass
     wrong = [e for e in entries if e["predicted_verdict"] != e["correct_verdict"]]
+    calib = None
+    try:
+        from calibration import _load
+        calib = _load()
+    except Exception:
+        pass
     return JSONResponse({
         "total": len(entries),
         "corrections": len(wrong),
         "accuracy_rate": round(1 - len(wrong) / max(len(entries), 1), 3),
+        "calibration": calib,
         "recent": entries[-10:][::-1],
+    })
+
+
+# ─── cases (cyber-cell case management) ───────────────────────────────────────
+
+class CaseReq(BaseModel):
+    case_no: str = ""
+    title: str = ""
+    officer_name: str = ""
+    officer_badge: str = ""
+    department: str = ""
+    suspect: str = ""
+    victim: str = ""
+    source_url: str = ""
+    incident_date: str = ""
+    priority: str = "MEDIUM"
+    notes: str = ""
+
+
+class CaseUpdateReq(BaseModel):
+    status: str = None
+    notes: str = None
+    priority: str = None
+    suspect: str = None
+    victim: str = None
+    title: str = None
+    officer_name: str = None
+    officer_badge: str = None
+    department: str = None
+    source_url: str = None
+    incident_date: str = None
+    case_no: str = None
+
+
+@app.get("/cases")
+async def cases_list():
+    from case_store import list_cases
+    return JSONResponse({"cases": list_cases()})
+
+
+@app.post("/cases", status_code=201)
+async def cases_create(req: CaseReq):
+    from case_store import create_case
+    case = create_case(req.dict())
+    return JSONResponse(case, status_code=201)
+
+
+@app.get("/cases/{case_id}")
+async def cases_get(case_id: str):
+    from case_store import get_case
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(404, "Case not found")
+    return JSONResponse(case)
+
+
+@app.patch("/cases/{case_id}")
+async def cases_update(case_id: str, req: CaseUpdateReq):
+    from case_store import update_case
+    case = update_case(case_id, {k: v for k, v in req.dict().items() if v is not None})
+    if not case:
+        raise HTTPException(404, "Case not found")
+    return JSONResponse(case)
+
+
+@app.post("/cases/{case_id}/evidence", status_code=202)
+async def cases_add_evidence(case_id: str, file: UploadFile = File(...),
+                             uploaded_by: str = Query(""), focus: str = Query("full")):
+    """Attach a video to a case (with chain-of-custody) and start analysis."""
+    from case_store import get_case, add_evidence
+    if not get_case(case_id):
+        raise HTTPException(404, "Case not found")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _ALL_EXTS:
+        raise HTTPException(400, f"Unsupported file type '{ext}'")
+
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large (max 500 MB)")
+
+    path = _tmp(ext)
+    with open(path, "wb") as f:
+        f.write(data)
+    del data
+
+    ev = add_evidence(case_id, filename=file.filename or "upload",
+                      file_path=path, uploaded_by=uploaded_by)
+
+    job_id = str(uuid.uuid4())
+    mtype  = _media_type(ext)
+    with _jobs_lock:
+        _jobs[job_id] = {"status": "pending", "result": None,
+                         "filename": file.filename, "case_id": case_id,
+                         "evidence_id": ev["evidence_id"], "focus": focus,
+                         "media_type": mtype,
+                         "submitted": datetime.now().isoformat()}
+
+    if mtype == "image":
+        _executor.submit(_run_image_job, job_id, path, file.filename or "upload",
+                         case_id, ev["evidence_id"])
+    elif mtype == "audio":
+        _executor.submit(_run_audio_job, job_id, path, file.filename or "upload",
+                         case_id, ev["evidence_id"])
+    else:
+        _executor.submit(_run_video_job, job_id, path, file.filename or "upload",
+                         case_id, ev["evidence_id"], focus)
+
+    return JSONResponse({"job_id": job_id, "evidence_id": ev["evidence_id"],
+                         "sha256": ev["sha256"], "media_type": mtype,
+                         "poll_url": f"/jobs/{job_id}"},
+                        status_code=202)
+
+
+@app.get("/cases/{case_id}/report", response_class=HTMLResponse)
+async def cases_report(case_id: str):
+    """Printable forensic report for a case (browser print → PDF)."""
+    from case_store import get_case
+    from report import render_case_report
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(404, "Case not found")
+    return HTMLResponse(render_case_report(case))
+
+
+# ─── admin panel ─────────────────────────────────────────────────────────────
+
+@app.get("/admin/jobs")
+async def admin_jobs(limit: int = Query(100, ge=1, le=1000)):
+    """All jobs sorted newest-first with full detail (status, stage, error, traceback)."""
+    with _jobs_lock:
+        jobs_snap = dict(_jobs)
+    rows = []
+    for jid, j in jobs_snap.items():
+        rows.append({
+            "job_id":    jid,
+            "filename":  j.get("filename", ""),
+            "status":    j.get("status", ""),
+            "stage":     j.get("stage", ""),
+            "error":     j.get("error", ""),
+            "traceback": j.get("traceback", ""),
+            "submitted": j.get("submitted", ""),
+            "finished":  j.get("finished", ""),
+            "media_type": j.get("media_type") or j.get("result", {}).get("media_type", ""),
+            "verdict":   j.get("result", {}).get("verdict", "") if j.get("result") else "",
+        })
+    rows.sort(key=lambda r: r["submitted"], reverse=True)
+    return JSONResponse({"jobs": rows[:limit], "total": len(rows)})
+
+
+@app.get("/admin/logs")
+async def admin_logs(
+    log_type: str = Query("errors", regex="^(errors|events)$"),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Return last N entries from errors.jsonl or events.jsonl."""
+    fpath = _ERROR_LOG if log_type == "errors" else _EVENT_LOG
+    if not os.path.exists(fpath):
+        return JSONResponse({"log_type": log_type, "entries": [], "total": 0})
+    rows = []
+    with open(fpath, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    rows.reverse()
+    return JSONResponse({"log_type": log_type, "entries": rows[:limit], "total": len(rows)})
+
+
+@app.get("/admin/stats")
+async def admin_stats():
+    """System stats: uptime, job counts, memory, disk."""
+    with _jobs_lock:
+        all_jobs = list(_jobs.values())
+    counts = {"pending": 0, "running": 0, "done": 0, "error": 0}
+    for j in all_jobs:
+        s = j.get("status", "")
+        if s in counts:
+            counts[s] += 1
+
+    mem_mb = None
+    try:
+        import psutil
+        proc = psutil.Process()
+        mem_mb = round(proc.memory_info().rss / 1024 / 1024, 1)
+        disk = psutil.disk_usage(".")
+        disk_info = {"total_gb": round(disk.total / 1e9, 1),
+                     "used_gb": round(disk.used / 1e9, 1),
+                     "free_gb": round(disk.free / 1e9, 1)}
+    except Exception:
+        disk_info = {}
+
+    now = datetime.now()
+    start = datetime.fromisoformat(_SERVER_START)
+    uptime_s = int((now - start).total_seconds())
+    hours, rem = divmod(uptime_s, 3600)
+    mins, secs = divmod(rem, 60)
+
+    error_log_size = 0
+    event_log_size = 0
+    if os.path.exists(_ERROR_LOG):
+        error_log_size = os.path.getsize(_ERROR_LOG)
+    if os.path.exists(_EVENT_LOG):
+        event_log_size = os.path.getsize(_EVENT_LOG)
+
+    return JSONResponse({
+        "server_start":   _SERVER_START,
+        "uptime":         f"{hours}h {mins}m {secs}s",
+        "uptime_seconds": uptime_s,
+        "jobs":           counts,
+        "total_jobs":     len(all_jobs),
+        "memory_mb":      mem_mb,
+        "disk":           disk_info,
+        "error_log_bytes": error_log_size,
+        "event_log_bytes": event_log_size,
+        "timestamp":      now.isoformat(),
     })
 
 

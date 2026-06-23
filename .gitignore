@@ -1,0 +1,36 @@
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ── Virtual envs ──────────────────────────────────────────────────────────
+venv/
+.venv/
+deepfake_detector/venv/
+env/
+
+# ── Model weights (large; downloaded at startup by model_downloader.py) ───
+*.pt
+*.pth
+.model_cache/
+deepfake_detector/_face_cache/
+
+# ── Runtime data / output (machine-local, not source) ─────────────────────
+deepfake_detector/results/
+deepfake_detector/logs/
+deepfake_detector/cases/
+deepfake_detector/calibration.json
+report.pdf
+*.pdf
+
+# ── Pipeline scratch dirs (created + cleaned per analysis) ─────────────────
+deepfake_detector/_pipe_*/
+deepfake_detector/_diag_tmp/
+deepfake_detector/cal_frames/
+deepfake_detector/cal_faces/
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp

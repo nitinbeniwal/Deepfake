@@ -33,12 +33,13 @@ def meta_classify(component_scores: dict) -> dict:
     max_s       = max(scores)
     min_s       = min(scores)
 
+    # NOTE: pipeline strips disabled signals (lipsync, spn — weight 0, inverted on
+    # compressed video) before calling meta_classify, so rules depending on them
+    # could never fire. Those rules were removed. Only live signals are read here.
     visual   = cs.get("visual",   0) or 0
     audio    = cs.get("audio",    0) or 0
     metadata = cs.get("metadata", 0) or 0
-    lipsync  = cs.get("lipsync",  0) or 0
     temporal = cs.get("temporal", 0) or 0
-    spn      = cs.get("spn",      0) or 0
     forensic = cs.get("forensic", 0) or 0
 
     boost = 0.0
@@ -69,41 +70,23 @@ def meta_classify(component_scores: dict) -> dict:
         confidence_adj = 1.30
         reasons.append(f"metadata AI tool ({metadata:.0f}%)")
 
-    # Rule 4: Audio + lipsync both high → voice+face faked together
-    if audio >= 65 and lipsync >= 65:
-        boost += 6
-        reasons.append("audio+lipsync sync mismatch")
+    # Rule 4: Temporal flicker strongly high → physical inconsistency boost.
+    # Temporal is the one heuristic kept live (weight 0.12); a strong reading
+    # nudges the verdict up but never overrides the visual models alone.
+    if temporal >= 80 and score_override is None:
+        boost += 8
+        reasons.append(f"temporal inconsistency ({temporal:.0f}%)")
 
-    # Rule 5: Physical signal override — temporal+SPN are camera-physics signals.
-    # They cannot be fooled by visual model bias toward older deepfake styles.
-    # Gemini/Veo full-generation videos score high on these even when visual says REAL.
-    if temporal >= 90 and spn >= 60:
-        phys = round((temporal * 0.55 + spn * 0.45), 1)
-        score_override = min(99, phys + 5)
-        confidence_adj = 1.20
-        reasons.append(f"physical override: temporal {temporal:.0f}% + SPN {spn:.0f}%")
-    elif temporal >= 80 and spn >= 50:
-        boost += 15
-        confidence_adj = max(confidence_adj, 1.10)
-        reasons.append(f"physical mismatch: temporal {temporal:.0f}% + SPN {spn:.0f}%")
-
-    # Rule 6: Conflicting signals → reduce confidence ONLY when no physical override
-    # Skip this penalty if temporal or SPN already dominating (visual model is likely wrong)
-    if (max_s > 70 and min_s < 20 and n_total >= 4
-            and temporal < 80 and spn < 50 and score_override is None):
+    # Rule 5: Conflicting signals → reduce confidence (no clear consensus).
+    if (max_s > 70 and min_s < 20 and n_total >= 4 and score_override is None):
         confidence_adj = min(confidence_adj, 0.85)
         reasons.append("conflicting signals")
 
-    # Rule 7: All signals low → high real confidence
+    # Rule 6: All signals low → high real confidence
     if n_low >= max(3, n_total - 1) and mean_s < 25:
         score_override = max(0, mean_s - 5)
         confidence_adj = 1.20
         reasons.append(f"high real consensus ({n_low} signals ≤25%)")
-
-    # Rule 8: SPN + temporal both moderately high → physical inconsistency boost
-    if spn >= 60 and temporal >= 60 and score_override is None:
-        boost += 8
-        reasons.append("physical noise+temporal mismatch")
 
     return {
         "score_override": score_override,

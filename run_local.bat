@@ -20,6 +20,8 @@ call venv\Scripts\activate.bat
 
 REM Set environment variables for local run
 set LOW_MEM=0
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 set TRANSFORMERS_CACHE=%~dp0.model_cache\hf
 set HF_HOME=%~dp0.model_cache\hf
 set PORT=8000

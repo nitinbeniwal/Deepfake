@@ -117,21 +117,85 @@ def detect_face(image_path, output_folder):
     return _crop_and_save(img, bbox, out)
 
 
+def _detect_mtcnn_batch(pils):
+    """
+    Run MTCNN once over a list of equal-size PIL images.
+
+    Per-frame MTCNN on CPU was the bottleneck (~0.5s × up-to-60 frames ≈ 30-60s
+    of "frames and face detection"). MTCNN.detect accepts the whole list in one
+    call and amortizes the work. Video frames share a resolution, so they batch
+    cleanly. Returns list aligned to `pils`, each a list of (x,y,w,h) boxes
+    (empty if none / low confidence). Returns None if MTCNN is unavailable so the
+    caller falls back to the per-image path.
+    """
+    mtcnn = _get_mtcnn()
+    if mtcnn is None:
+        return None
+
+    # MTCNN cost scales with image area. HD/4K phone video is the slow case, so
+    # detect on a copy capped to 640px longest side and scale boxes back up.
+    from PIL import Image
+    W0, H0 = pils[0].size
+    scale = min(1.0, 640.0 / max(W0, H0))
+    if scale < 1.0:
+        det_pils = [p.resize((max(1, int(W0 * scale)), max(1, int(H0 * scale))),
+                             Image.BILINEAR) for p in pils]
+        inv = 1.0 / scale
+    else:
+        det_pils, inv = pils, 1.0
+
+    try:
+        batch_boxes, batch_probs = mtcnn.detect(det_pils)
+    except Exception:
+        return None
+    out = []
+    for boxes, probs in zip(batch_boxes, batch_probs):
+        faces = []
+        if boxes is not None:
+            for box, prob in zip(boxes, probs):
+                if prob is not None and prob >= 0.90:
+                    x1, y1, x2, y2 = [int(c * inv) for c in box]
+                    w, h = x2 - x1, y2 - y1
+                    if w > 0 and h > 0:
+                        faces.append((x1, y1, w, h))
+        out.append(faces)
+    return out
+
+
 def detect_faces_batch(image_paths, output_folder):
-    """Batch face detection. Returns list[path|None] same order as input."""
+    """Batch face detection. Returns list[path|None] same order as input.
+
+    Fast path: decode all frames, group by resolution, run MTCNN once per group.
+    Falls back to per-image Haar where MTCNN finds nothing or is unavailable.
+    """
+    from PIL import Image
     os.makedirs(output_folder, exist_ok=True)
-    results = []
-    for p in image_paths:
-        img = cv2.imread(p)
+
+    # Decode all frames in parallel (I/O bound).
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        imgs = list(ex.map(cv2.imread, image_paths))
+
+    results = [None] * len(image_paths)
+
+    # Group decodable frames by (H,W) so each MTCNN batch is uniform.
+    groups: dict = {}
+    for i, img in enumerate(imgs):
         if img is None:
-            results.append(None)
             continue
-        faces = _detect_all(img)
-        if not faces:
-            results.append(None)
-            continue
-        bbox  = max(faces, key=lambda f: f[2] * f[3])
-        out   = os.path.join(output_folder, os.path.basename(p))
-        saved = _crop_and_save(img, bbox, out)
-        results.append(saved)
+        groups.setdefault(img.shape[:2], []).append(i)
+
+    for _shape, idxs in groups.items():
+        pils = [Image.fromarray(cv2.cvtColor(imgs[i], cv2.COLOR_BGR2RGB)) for i in idxs]
+        batch = _detect_mtcnn_batch(pils)   # None if MTCNN unavailable
+        for k, i in enumerate(idxs):
+            faces = batch[k] if batch is not None else _detect_haar(imgs[i])
+            if not faces:
+                faces = _detect_haar(imgs[i])   # MTCNN missed → Haar fallback
+            if not faces:
+                continue
+            bbox  = max(faces, key=lambda f: f[2] * f[3])
+            out   = os.path.join(output_folder, os.path.basename(image_paths[i]))
+            results[i] = _crop_and_save(imgs[i], bbox, out)
+
     return results
