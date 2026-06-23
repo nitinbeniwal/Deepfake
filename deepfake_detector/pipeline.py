@@ -381,7 +381,20 @@ def analyze_video(video_path, cleanup=True, on_stage=None, focus="full"):
 
         # ── Step 8: Combine all scalar scores ────────────────────────────
         step("combining")
-        final = _combine(cs, focus)
+        # Learned fusion head takes over IF it has been trained on labeled data
+        # (fusion_model.json present); otherwise fall back to the weighted average.
+        fused = None
+        try:
+            from fusion_head import fuse as _fuse
+            fused = _fuse(cs)
+        except Exception:
+            fused = None
+        if fused is not None:
+            final = fused
+            components["fusion"] = {"score": fused, "source": "learned"}
+        else:
+            final = _combine(cs, focus)
+            components["fusion"] = {"score": final, "source": "weighted_average"}
 
         try:
             from meta_classifier import meta_classify

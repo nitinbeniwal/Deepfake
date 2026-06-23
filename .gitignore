@@ -21,6 +21,7 @@ deepfake_detector/results/
 deepfake_detector/logs/
 deepfake_detector/cases/
 deepfake_detector/calibration.json
+deepfake_detector/fusion_model.json
 report.pdf
 *.pdf
 

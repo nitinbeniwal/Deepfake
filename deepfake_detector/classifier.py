@@ -50,15 +50,20 @@ _XCEPTION_ID     = "timm:xception_deepfake"
 _EFFICIENTNET_ID = "timm:efficientnet_b4_deepfake"
 
 _MODELS = [
-    # (model_id, weight, stage)   — weights sum to 1.0
+    # (model_id, weight, stage)   — relative weights (runtime normalizes by total)
+    # Weights reflect domain fit, NOT a measured benchmark: the FF++-trained CNNs
+    # are the face-swap/compression specialists and carry the load; the SDXL
+    # detector is an AI-IMAGE (diffusion) detector — weak on face-swap video, so
+    # it keeps a tiny weight. Once train_fusion.py is trained on labeled clips the
+    # FUSION HEAD learns the real signal weighting and this sub-weighting matters less.
     # HuggingFace ViT models (IDs verified live on HF Hub 2026-06)
-    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.12, 1),
+    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.14, 1),   # strongest FF++ ViT
     ("dima806/deepfake_vs_real_image_detection",        0.10, 2),
-    ("Wvolf/ViT_Deepfake_Detection",                   0.08, 2),   # was hyphen ID (404)
-    ("prithivMLmods/Deep-Fake-Detector-Model",         0.07, 3),   # was Exp-02 (404)
-    ("Organika/sdxl-detector",                          0.05, 3),  # AI-generation detector (Gemini/Sora-type)
-    # CNN specialists — highest weights, run last
-    (_XCEPTION_ID,                                      0.33, 3),
+    ("Wvolf/ViT_Deepfake_Detection",                   0.08, 2),
+    ("prithivMLmods/Deep-Fake-Detector-Model",         0.06, 3),
+    ("Organika/sdxl-detector",                          0.02, 3),  # AI-gen (diffusion), wrong domain for face-swap video
+    # CNN specialists — FF++ trained, highest weight, run last
+    (_XCEPTION_ID,                                      0.35, 3),
     (_EFFICIENTNET_ID,                                  0.25, 3),
 ]
 
