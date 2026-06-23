@@ -47,11 +47,19 @@ def _to_wav(path):
 
 def classify_audio(path):
     import librosa
+    import numpy as np
     wav = _to_wav(path)
     cleanup = wav != path
     try:
         y, sr = librosa.load(wav, sr=16000, mono=True)
-        dur, pipe, W = len(y)/sr, _get_pipe(), 4.0
+        dur = len(y) / sr if sr else 0.0
+        # No real audio to judge → return None (EXCLUDED from the score) instead of
+        # classifying silence as "real". Many WhatsApp/social clips have no/empty
+        # audio; counting that as a real vote wrongly drags fake videos down.
+        rms = float(np.sqrt(np.mean(y ** 2))) if len(y) else 0.0
+        if dur < 0.5 or rms < 1e-3:
+            return None
+        pipe, W = _get_pipe(), 4.0
         if dur <= W:
             return round(statistics.median([_score(pipe({"array": y, "sampling_rate": sr}))]), 2)
         scores, start = [], 0.0
