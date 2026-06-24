@@ -1,5 +1,7 @@
 """
-classifier.py — 7-model deepfake detection ensemble.
+classifier.py — 9-model deepfake detection ensemble (7 HF + 2 timm CNN).
+Two families: face-swap specialists (FF++ ViTs/CNNs) + AI-generation detectors
+(diffusion/GAN, for fully-synthetic Gemini/Veo/SDXL frames). See _MODELS below.
 
 Visual pipeline (sequential, one model at a time, each unloaded before next):
 
@@ -51,20 +53,26 @@ _EFFICIENTNET_ID = "timm:efficientnet_b4_deepfake"
 
 _MODELS = [
     # (model_id, weight, stage)   — relative weights (runtime normalizes by total)
-    # Weights reflect domain fit, NOT a measured benchmark: the FF++-trained CNNs
-    # are the face-swap/compression specialists and carry the load; the SDXL
-    # detector is an AI-IMAGE (diffusion) detector — weak on face-swap video, so
-    # it keeps a tiny weight. Once train_fusion.py is trained on labeled clips the
-    # FUSION HEAD learns the real signal weighting and this sub-weighting matters less.
-    # HuggingFace ViT models (IDs verified live on HF Hub 2026-06)
-    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.14, 1),   # strongest FF++ ViT
-    ("dima806/deepfake_vs_real_image_detection",        0.10, 2),
-    ("Wvolf/ViT_Deepfake_Detection",                   0.08, 2),
+    # Full ensemble = union of both prior model sets (all verified loading on HF).
+    # Two families, on purpose:
+    #   FACE-SWAP specialists (FF++-trained ViTs + CNNs) — catch DeepFaceLab/Roop/
+    #     FaceFusion/Wav2Lip type manipulations.
+    #   AI-GENERATION detectors (diffusion/GAN) — catch fully synthetic frames
+    #     (Gemini/Veo/SDXL/Midjourney), which the FF++ models miss. These carry
+    #     real weight now because that was the gap (Gemini video scored low).
+    # The fusion head (train_fusion.py), once trained, learns the true weighting.
+    # ── Face-swap / deepfake specialists (ViT) ──
+    ("prithivMLmods/Deep-Fake-Detector-v2-Model",      0.13, 1),   # strongest FF++ ViT
+    ("dima806/deepfake_vs_real_image_detection",        0.08, 2),
+    ("Wvolf/ViT_Deepfake_Detection",                   0.07, 2),
     ("prithivMLmods/Deep-Fake-Detector-Model",         0.06, 3),
-    ("Organika/sdxl-detector",                          0.02, 3),  # AI-gen (diffusion), wrong domain for face-swap video
-    # CNN specialists — FF++ trained, highest weight, run last
-    (_XCEPTION_ID,                                      0.35, 3),
-    (_EFFICIENTNET_ID,                                  0.25, 3),
+    ("prithivMLmods/deepfake-detector-model-v1",       0.06, 3),   # re-added (was on remote)
+    # ── AI-generation detectors (diffusion / GAN — catch Gemini/Veo/SDXL) ──
+    ("umm-maybe/AI-image-detector",                    0.05, 2),   # re-added; AI-gen images/video
+    ("Organika/sdxl-detector",                          0.05, 3),  # diffusion-image detector (Gemini/SD)
+    # ── CNN specialists — FF++ trained, highest weight, run last ──
+    (_XCEPTION_ID,                                      0.30, 3),
+    (_EFFICIENTNET_ID,                                  0.20, 3),
 ]
 
 _FAKE = ("fake","deepfake","spoof","synthetic","artificial","generated",
