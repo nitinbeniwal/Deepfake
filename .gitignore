@@ -31,6 +31,22 @@ deepfake_detector/_diag_tmp/
 deepfake_detector/cal_frames/
 deepfake_detector/cal_faces/
 
+# ── Datasets + training scratch (downloaded on the training machine) ──────
+datasets/
+dataset/
+deepfake_detector/training/datasets/
+deepfake_detector/training/dataset/
+deepfake_detector/training/_face_cache/
+deepfake_detector/training/*.csv
+deepfake_detector/_server.log
+
+# ── Credentials — NEVER commit (Kaggle/HF/ModelScope tokens) ──────────────
+**/creds.env
+**/.env
+**/access_token
+**/kaggle.json
+*.token
+
 # ── OS / editor cruft ─────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
