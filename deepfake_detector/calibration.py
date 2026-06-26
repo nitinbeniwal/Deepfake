@@ -26,7 +26,7 @@ _lock = threading.Lock()
 # Offset is SUBTRACTED from each visual model score (0..100). Positive offset
 # pushes scores down (use when real footage reads too high). Bounded so a noisy
 # feedback batch can never flip the whole system.
-_OFFSET_MIN, _OFFSET_MAX = -20.0, 40.0
+_OFFSET_MIN, _OFFSET_MAX = -20.0, 50.0
 
 _DEFAULTS = {
     "visual_offset": 0.0,

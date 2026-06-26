@@ -41,14 +41,14 @@ _KEEP_WARM = (not _LOW_MEM) and os.environ.get("KEEP_MODELS_WARM", "1") != "0"
 # i.e. they fire on the genuine clip. They still run for display but do not affect
 # the score. Temporal is the only heuristic that separated correctly, kept small.
 W = {
-    "visual":    0.55,
-    "audio":     0.17,
-    "temporal":  0.12,
+    "visual":    0.62,   # the only trusted signal — give it the most share
+    "audio":     0.06,   # cut: voice-clone model flags reel MUSIC/processed audio as fake
+    "temporal":  0.08,   # cut: fires high on compressed REAL video (inversion)
     "lipsync":   0.00,   # disabled — inverted on compressed video
     "spn":       0.00,   # disabled — inverted on compressed video
     "frequency": 0.05,   # texture + spectral analysis (numpy, no ML)
     "forensic":  0.08,
-    "metadata":  0.05,
+    "metadata":  0.02,   # cut: WhatsApp strips metadata on ALL clips → false suspicion
 }
 
 # ── Focus modes ───────────────────────────────────────────────────────────────
